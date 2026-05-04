@@ -1,0 +1,100 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: legalbot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  migrate:
+    build:
+      context: .
+    command: ["migrate"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: api
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - blobs:/var/lib/legalbot/blobs
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+    command: ["worker"]
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: worker
+      # In-memory fake mailboxes only share state within one prefork child; use 1
+      # so poll/ingest/inject-fake all see the same FakeEmailProvider dicts.
+      CELERY_CONCURRENCY: "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - blobs:/var/lib/legalbot/blobs
+
+  beat:
+    build:
+      context: .
+    command: ["beat"]
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: beat
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  blobs:

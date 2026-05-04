@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: legalbot_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  tests:
+    build:
+      context: .
+    command: ["shell", "-m", "pytest", "-q"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/legalbot_test
+      DATABASE_URL_SYNC: postgresql+psycopg://postgres:postgres@postgres:5432/legalbot_test
+      DATABASE_URL_PSYCOPG: postgresql://postgres:postgres@postgres:5432/legalbot_test
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CELERY_REDBEAT_URL: redis://redis:6379/3
+      ENV: test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

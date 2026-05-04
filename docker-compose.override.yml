@@ -1,0 +1,15 @@
+services:
+  api:
+    command: ["api", "--reload"]
+    volumes:
+      - ./src:/app/src
+      - blobs:/var/lib/legalbot/blobs
+
+  worker:
+    volumes:
+      - ./src:/app/src
+      - blobs:/var/lib/legalbot/blobs
+
+  beat:
+    volumes:
+      - ./src:/app/src
