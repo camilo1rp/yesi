@@ -19,6 +19,8 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from legalbot.agents.act_graph import build_act_graph
 from legalbot.agents.analyze_graph import build_analyze_graph
+from legalbot.agents.contract_graph import build_contract_graph
+from legalbot.agents.contract_validation_graph import build_contract_validation_graph
 from legalbot.agents.extract_graph import build_extract_graph
 from legalbot.agents.reflect_graph import build_reflect_graph
 from legalbot.core.logging import get_logger
@@ -100,6 +102,8 @@ def build_compiled_subagents(
     extract_graph = build_extract_graph(checkpointer=checkpointer)
     analyze_graph = build_analyze_graph(checkpointer=checkpointer)
     act_graph = build_act_graph(checkpointer=checkpointer)
+    contract_graph = build_contract_graph(checkpointer=checkpointer)
+    contract_validation_graph = build_contract_validation_graph(checkpointer=checkpointer)
     reflect_graph = build_reflect_graph(checkpointer=checkpointer, store=store)
 
     return [
@@ -117,6 +121,23 @@ def build_compiled_subagents(
             name="act",
             description="Draft replies, schedule follow-ups, and request approvals.",
             runnable=_StageCheckpointNamespace(act_graph, "act"),
+        ),
+        CompiledSubAgent(
+            name="draft_contract",
+            description=(
+                "Validate the requested contract type is supported and unambiguous, "
+                "gather required fields from the email and extracted documents, and "
+                "deterministically fill the contract template."
+            ),
+            runnable=_StageCheckpointNamespace(contract_graph, "draft_contract"),
+        ),
+        CompiledSubAgent(
+            name="validate_contract",
+            description=(
+                "Review a drafted contract against example contracts and report "
+                "pattern adherence and possible mismatches."
+            ),
+            runnable=_StageCheckpointNamespace(contract_validation_graph, "validate_contract"),
         ),
         CompiledSubAgent(
             name="reflection",

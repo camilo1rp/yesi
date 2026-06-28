@@ -101,6 +101,14 @@ class ActOutputState(StageOutputState, total=False):
     pass
 
 
+class ContractOutputState(StageOutputState, total=False):
+    pass
+
+
+class ContractValidationOutputState(StageOutputState, total=False):
+    pass
+
+
 class ReflectOutputState(StageOutputState, total=False):
     pass
 

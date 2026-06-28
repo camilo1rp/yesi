@@ -6,6 +6,13 @@ from legalbot.agents.tools.artifact_tools import (
     update_artifact,
     write_artifact,
 )
+from legalbot.agents.tools.contract_tools import (
+    classify_contract,
+    fill_contract_template,
+    get_contract_requirements,
+    list_contract_types,
+    search_contract_examples,
+)
 from legalbot.agents.tools.domain import (
     analyze_image,
     fetch_email,
@@ -17,11 +24,16 @@ from legalbot.agents.tools.domain import (
 
 __all__ = [
     "analyze_image",
+    "classify_contract",
     "fetch_email",
+    "fill_contract_template",
+    "get_contract_requirements",
     "list_artifacts",
+    "list_contract_types",
     "read_artifact",
     "run_attachment_extraction",
     "schedule_followup",
+    "search_contract_examples",
     "send_draft",
     "update_artifact",
     "write_artifact",
