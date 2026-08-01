@@ -169,6 +169,8 @@ async def _ingest_message(mailbox_id: str, provider_message_id: str) -> dict[str
             mailbox_id=mb.id,
         )
         await db.commit()
+        from legalbot.core.config import get_settings
+
         log.info(
             "ingest.done",
             mailbox_id=mailbox_id,
@@ -176,4 +178,8 @@ async def _ingest_message(mailbox_id: str, provider_message_id: str) -> dict[str
             item_id=str(item.id),
             job_id=str(job.id) if job else None,
         )
+        if get_settings().KG_ENABLED:
+            from legalbot.workers.graph import graph_index_item
+
+            graph_index_item.delay(str(item.id))
         return {"item_id": str(item.id), "job_id": str(job.id) if job else None}

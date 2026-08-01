@@ -126,6 +126,22 @@ async def _resume_run(run_id: str, resume_payload: Any) -> dict[str, Any]:
             await db.execute(select(SessionRow).where(SessionRow.id == run.session_id))
         ).scalar_one()
         has_attachments = await _run_has_attachments(db, run)
+        if run.kind == RunKind.pipeline:
+            job_svc = JobService(db)
+            try:
+                await job_svc.transition(
+                    session.job_id,
+                    from_state=JobState.awaiting_human,
+                    to_state=JobState.processing,
+                )
+            except InvalidJobTransition as inv:
+                log.warning(
+                    "resume.job_transition_skipped",
+                    job_id=str(session.job_id),
+                    run_id=str(run.id),
+                    error=str(inv),
+                )
+            await db.commit()
 
     graph_ok = await _invoke_graph(
         run_id=run.id,
@@ -209,6 +225,11 @@ async def _invoke_graph(
         session = (
             await db.execute(select(SessionRow).where(SessionRow.id == session_id))
         ).scalar_one()
+        job = (
+            await db.execute(
+                select(ProcessingJob).where(ProcessingJob.id == session.job_id)
+            )
+        ).scalar_one_or_none()
 
     graph = await get_compiled_graph()
     config = {
@@ -232,12 +253,25 @@ async def _invoke_graph(
                 )
             output_state = await graph.ainvoke(Command(resume=resume_payload), config=config)
         else:
+            from langchain_core.messages import HumanMessage
+
             initial_state: dict[str, Any] = {
                 "session_id": str(session_id),
                 "run_id": str(run_id),
                 "user_id": session.owner_user_id,
                 "graph_thread_id": session.thread_id,
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Process the inbound email for this job end-to-end. "
+                            "Your first action must be task('extract', ...)."
+                        )
+                    )
+                ],
             }
+            if job is not None:
+                initial_state["job_id"] = str(job.id)
+                initial_state["email_id"] = str(job.ingestion_item_id)
             if has_attachments is not None:
                 initial_state["has_attachments"] = has_attachments
             output_state = await graph.ainvoke(initial_state, config=config)
@@ -249,6 +283,12 @@ async def _invoke_graph(
             log.info("graph.interrupted", run_id=str(run_id), session_id=str(session_id))
             await _mark_run_status(run_id, RunStatus.awaiting_human)
             await _persist_interrupt_from_checkpoint(graph, config, session_id, run_id)
+            await _transition_pipeline_job(
+                session_id=session_id,
+                run_id=run_id,
+                from_state=JobState.processing,
+                to_state=JobState.awaiting_human,
+            )
         else:
             await _mark_run_status(run_id, RunStatus.completed)
             await _finalize_job_if_primary(session_id, run_id)
@@ -487,6 +527,42 @@ async def _release_concurrency_budget(job_id: uuid.UUID) -> None:
         log.info("budget.released", job_id=str(job_id))
     except Exception:
         log.exception("budget.release_failed", job_id=str(job_id))
+
+
+async def _transition_pipeline_job(
+    *,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    from_state: JobState,
+    to_state: JobState,
+) -> None:
+    """Move the primary pipeline job when the graph pauses or resumes HITL."""
+    sm = async_session_factory()
+    async with sm() as db:
+        run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one()
+        if run.kind != RunKind.pipeline:
+            return
+        session = (
+            await db.execute(select(SessionRow).where(SessionRow.id == session_id))
+        ).scalar_one()
+        job_svc = JobService(db)
+        try:
+            await job_svc.transition(
+                session.job_id,
+                from_state=from_state,
+                to_state=to_state,
+            )
+        except InvalidJobTransition as inv:
+            log.warning(
+                "pipeline.job_transition_skipped",
+                job_id=str(session.job_id),
+                run_id=str(run_id),
+                from_state=str(from_state),
+                to_state=str(to_state),
+                error=str(inv),
+            )
+            return
+        await db.commit()
 
 
 async def _finalize_job_if_primary(session_id: uuid.UUID, run_id: uuid.UUID) -> None:

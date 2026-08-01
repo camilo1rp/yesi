@@ -37,6 +37,7 @@ def _build_app() -> Celery:
             "legalbot.workers.runs",
             "legalbot.workers.scheduled",
             "legalbot.workers.janitors",
+            "legalbot.workers.graph",
         ]
     )
     return app
@@ -47,6 +48,7 @@ celery_app = _build_app()
 # Register static beat schedules after the app is fully constructed to avoid
 # a circular import when `schedules_static` imports `celery_app`.
 from legalbot.workers import (  # noqa: E402,F401
+    graph,
     ingest,
     janitors,
     runs,
