@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -368,6 +369,103 @@ class UserIntervention(Base, UUIDPKMixin):
     decided_by: Mapped[str | None] = mapped_column(String(255))
 
 
+class KgEntity(Base, UUIDPKMixin, TimestampMixin):
+    __tablename__ = "kg_entity"
+
+    owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "type",
+            "canonical_key",
+            name="uq_kg_entity_owner_type_key",
+        ),
+        Index("ix_kg_entity_owner_type", "owner_user_id", "type"),
+    )
+
+
+class KgAlias(Base, UUIDPKMixin):
+    __tablename__ = "kg_alias"
+
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kg_entity.id", ondelete="CASCADE"),
+        index=True,
+    )
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("entity_id", "alias", name="uq_kg_alias_entity_alias"),
+    )
+
+
+class KgEdge(Base, UUIDPKMixin):
+    __tablename__ = "kg_edge"
+
+    owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    src_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kg_entity.id", ondelete="CASCADE"),
+        index=True,
+    )
+    dst_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kg_entity.id", ondelete="CASCADE"),
+        index=True,
+    )
+    relation: Mapped[str] = mapped_column(String(64), nullable=False)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="deterministic")
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "src_id",
+            "dst_id",
+            "relation",
+            "source_type",
+            "source_id",
+            name="uq_kg_edge_dedup",
+        ),
+        Index("ix_kg_edge_owner_relation", "owner_user_id", "relation"),
+    )
+
+
+class KgMention(Base, UUIDPKMixin):
+    __tablename__ = "kg_mention"
+
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kg_entity.id", ondelete="CASCADE"),
+        index=True,
+    )
+    owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_kg_mention_source", "owner_user_id", "source_type", "source_id"),
+    )
+
+
 class ScheduledJob(Base, UUIDPKMixin, TimestampMixin):
     __tablename__ = "scheduled_job"
 
@@ -403,6 +501,10 @@ __all__ = [
     "IngestionAttachment",
     "IngestionItem",
     "InterruptRequest",
+    "KgAlias",
+    "KgEdge",
+    "KgEntity",
+    "KgMention",
     "Mailbox",
     "ProcessingJob",
     "Run",

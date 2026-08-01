@@ -21,6 +21,7 @@ from legalbot.agents.tools.domain import (
     send_draft,
     write_draft,
 )
+from legalbot.agents.tools.graph_tools import search_related_docs
 
 __all__ = [
     "analyze_image",
@@ -34,6 +35,7 @@ __all__ = [
     "run_attachment_extraction",
     "schedule_followup",
     "search_contract_examples",
+    "search_related_docs",
     "send_draft",
     "update_artifact",
     "write_artifact",

@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # BigTool
     BIGTOOL_ENABLED: bool = False
 
+    # Knowledge graph (Phase 1 deterministic indexing)
+    KG_ENABLED: bool = True
+    KG_SEARCH_TOP_K: int = 8
+
     # Dev-only email fake mailbox for local e2e
     DEV_FAKE_PROVIDER_ENABLED: bool = True
 
