@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # Knowledge graph (Phase 1 deterministic indexing)
     KG_ENABLED: bool = True
     KG_SEARCH_TOP_K: int = 8
+    KG_LLM_EXTRACTION_ENABLED: bool = False
+    KG_EXTRACTION_MODEL: str = "anthropic:claude-haiku-4-5"
+    KG_MERGE_TRGM_THRESHOLD: float = 0.85
+    KG_MERGE_EMBED_THRESHOLD: float = 0.92
 
     # Dev-only email fake mailbox for local e2e
     DEV_FAKE_PROVIDER_ENABLED: bool = True

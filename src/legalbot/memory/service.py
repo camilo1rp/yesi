@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -12,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from legalbot.core.config import get_settings
 from legalbot.core.logging import get_logger
+from legalbot.db.types import RunKind, RunStatus
 from legalbot.db.models import (
+    Artifact,
     EmailMetadata,
     IngestionAttachment,
     IngestionItem,
@@ -20,11 +23,22 @@ from legalbot.db.models import (
     KgEdge,
     KgEntity,
     KgMention,
+    Run,
+)
+from legalbot.memory.extraction import (
+    EMAIL_SRC_KEY,
+    build_artifact_anchor_projection,
+    build_projection_from_artifacts,
+    llm_enrich_projection,
+    merge_projections,
 )
 from legalbot.memory.ontology import (
     EntityType,
+    GraphProjection,
+    attachment_filename_key,
     ingestion_attachment_canonical_key,
     ingestion_item_canonical_key,
+    normalize_name,
     parse_email_address,
     person_canonical_key,
     person_canonical_name,
@@ -369,6 +383,290 @@ class KnowledgeGraphService:
             "item_id": str(item.id),
             "email_entity_id": str(email_entity.id),
         }
+
+    async def index_run(self, run_id: uuid.UUID) -> dict[str, Any]:
+        """Phase 2: project entities/edges from pipeline artifacts after a successful run."""
+        run = (
+            await self.db.execute(select(Run).where(Run.id == run_id))
+        ).scalar_one_or_none()
+        if run is None:
+            return {"ok": False, "reason": "run_not_found"}
+        if run.kind != RunKind.pipeline:
+            return {"ok": False, "reason": "not_pipeline_run"}
+        if run.status != RunStatus.completed:
+            return {"ok": False, "reason": "run_not_completed", "status": run.status}
+
+        from legalbot.db.models import ProcessingJob
+
+        job = (
+            await self.db.execute(
+                select(ProcessingJob).where(ProcessingJob.id == run.job_id)
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            return {"ok": False, "reason": "job_not_found"}
+
+        item = (
+            await self.db.execute(
+                select(IngestionItem).where(IngestionItem.id == job.ingestion_item_id)
+            )
+        ).scalar_one_or_none()
+        if item is None:
+            return {"ok": False, "reason": "ingestion_item_not_found"}
+
+        owner = item.owner_user_id
+        phase1 = await self.index_ingestion_item(item.id)
+        if not phase1.get("ok"):
+            return phase1
+
+        email_entity = (
+            await self.db.execute(
+                select(KgEntity).where(
+                    KgEntity.owner_user_id == owner,
+                    KgEntity.canonical_key == ingestion_item_canonical_key(item.id),
+                )
+            )
+        ).scalar_one_or_none()
+        if email_entity is None:
+            return {"ok": False, "reason": "email_entity_missing"}
+
+        artifacts = await self._load_session_artifacts(run.session_id)
+        if not artifacts.get("analysis/summary") and not artifacts.get("analysis/extracted"):
+            log.info(
+                "graph.index_run.no_analysis_artifacts",
+                run_id=str(run_id),
+                session_id=str(run.session_id),
+            )
+
+        projection = build_projection_from_artifacts(artifacts)
+        anchor = build_artifact_anchor_projection(artifacts, run.session_id)
+        projection = merge_projections(projection, anchor)
+        projection = await llm_enrich_projection(artifacts, projection)
+
+        applied = await self._apply_projection(
+            owner_user_id=owner,
+            projection=projection,
+            email_entity=email_entity,
+            source_type="run",
+            source_id=run_id,
+            ingestion_item_id=item.id,
+        )
+
+        return {
+            "ok": True,
+            "run_id": str(run_id),
+            "ingestion_item_id": str(item.id),
+            "entities_upserted": applied["entities"],
+            "edges_added": applied["edges"],
+        }
+
+    async def _load_session_artifacts(self, session_id: uuid.UUID) -> dict[str, Any]:
+        rows = (
+            (
+                await self.db.execute(
+                    select(Artifact).where(
+                        Artifact.session_id == session_id,
+                        Artifact.is_latest.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        bundle: dict[str, Any] = {}
+        for row in rows:
+            if row.storage == "inline":
+                bundle[row.key] = row.content_inline
+            elif row.mime == "application/json" and row.blob_ref:
+                from legalbot.artifacts.blobstore import get_blob_store
+
+                data = await get_blob_store().get(row.blob_ref)
+                bundle[row.key] = json.loads(data)
+        return bundle
+
+    async def resolve_entity(
+        self,
+        *,
+        owner_user_id: str,
+        entity_type: EntityType | str,
+        canonical_key: str,
+        canonical_name: str,
+        aliases: list[str] | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> KgEntity:
+        """Match existing entity by key, then fuzzy alias/name; else create."""
+        type_str = str(entity_type)
+        existing = (
+            await self.db.execute(
+                select(KgEntity).where(
+                    KgEntity.owner_user_id == owner_user_id,
+                    KgEntity.type == type_str,
+                    KgEntity.canonical_key == canonical_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        settings = get_settings()
+        if self._is_postgres() and canonical_name.strip():
+            matches = await self._search_entities(
+                owner_user_id=owner_user_id,
+                query=canonical_name,
+                limit=5,
+            )
+            typed = [
+                m
+                for m in matches
+                if m["type"] == type_str and m["score"] >= settings.KG_MERGE_TRGM_THRESHOLD
+            ]
+            if len(typed) == 1:
+                resolved = (
+                    await self.db.execute(
+                        select(KgEntity).where(KgEntity.id == typed[0]["id"])
+                    )
+                ).scalar_one()
+                log.info(
+                    "graph.entity_resolved_trgm",
+                    owner_user_id=owner_user_id,
+                    canonical_key=canonical_key,
+                    matched_id=str(resolved.id),
+                    score=typed[0]["score"],
+                )
+                if canonical_name.strip():
+                    await self._upsert_alias(resolved.id, canonical_name.strip())
+                for alias in aliases or []:
+                    if alias.strip():
+                        await self._upsert_alias(resolved.id, alias.strip())
+                return resolved
+            if len(typed) > 1:
+                log.warning(
+                    "graph.entity_resolution_ambiguous",
+                    owner_user_id=owner_user_id,
+                    canonical_key=canonical_key,
+                    candidates=[str(m["id"]) for m in typed],
+                )
+
+        return await self.upsert_entity(
+            owner_user_id=owner_user_id,
+            entity_type=entity_type,
+            canonical_key=canonical_key,
+            canonical_name=canonical_name,
+            attributes=attributes,
+            alias=canonical_name,
+        )
+
+    async def _apply_projection(
+        self,
+        *,
+        owner_user_id: str,
+        projection: GraphProjection,
+        email_entity: KgEntity,
+        source_type: str,
+        source_id: uuid.UUID,
+        ingestion_item_id: uuid.UUID | None = None,
+    ) -> dict[str, int]:
+        key_to_entity: dict[tuple[str, str], KgEntity] = {}
+
+        for pent in projection.entities:
+            row = await self.resolve_entity(
+                owner_user_id=owner_user_id,
+                entity_type=pent.entity_type,
+                canonical_key=pent.canonical_key,
+                canonical_name=pent.canonical_name,
+                aliases=pent.aliases,
+                attributes=pent.attributes,
+            )
+            key_to_entity[(str(pent.entity_type), pent.canonical_key)] = row
+            await self.add_mention(
+                owner_user_id=owner_user_id,
+                entity_id=row.id,
+                source_type=source_type,
+                source_id=source_id,
+                snippet=pent.snippet,
+                confidence=pent.confidence,
+            )
+            if ingestion_item_id is not None:
+                await self.add_mention(
+                    owner_user_id=owner_user_id,
+                    entity_id=row.id,
+                    source_type="ingestion_item",
+                    source_id=ingestion_item_id,
+                    snippet=pent.snippet,
+                    confidence=pent.confidence,
+                )
+
+        edges_added = 0
+        for edge in projection.edges:
+            src_key = edge.src_key
+            if edge.src_type == EntityType.EMAIL and src_key == EMAIL_SRC_KEY:
+                src_entity = email_entity
+            elif (
+                edge.src_type == EntityType.ATTACHMENT
+                and src_key.startswith("__attachment__:")
+                and ingestion_item_id is not None
+            ):
+                src_entity = await self._resolve_attachment_entity(
+                    owner_user_id=owner_user_id,
+                    ingestion_item_id=ingestion_item_id,
+                    filename_key=src_key,
+                )
+                if src_entity is None:
+                    continue
+            else:
+                src_entity = key_to_entity.get((str(edge.src_type), src_key))
+            dst_entity = key_to_entity.get((str(edge.dst_type), edge.dst_key))
+            if src_entity is None or dst_entity is None:
+                continue
+            await self.add_edge(
+                owner_user_id=owner_user_id,
+                src_id=src_entity.id,
+                dst_id=dst_entity.id,
+                relation=edge.relation,
+                source_type=source_type,
+                source_id=source_id,
+                confidence=edge.confidence,
+                origin=edge.origin,
+                attributes=edge.attributes,
+            )
+            edges_added += 1
+
+        return {"entities": len(key_to_entity), "edges": edges_added}
+
+    async def _resolve_attachment_entity(
+        self,
+        *,
+        owner_user_id: str,
+        ingestion_item_id: uuid.UUID,
+        filename_key: str,
+    ) -> KgEntity | None:
+        prefix = "__attachment__:"
+        if not filename_key.startswith(prefix):
+            return None
+        normalized = filename_key[len(prefix):]
+        attachments = (
+            (
+                await self.db.execute(
+                    select(IngestionAttachment).where(
+                        IngestionAttachment.ingestion_item_id == ingestion_item_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for att in attachments:
+            if normalize_name(att.name or "") != normalized:
+                continue
+            return (
+                await self.db.execute(
+                    select(KgEntity).where(
+                        KgEntity.owner_user_id == owner_user_id,
+                        KgEntity.canonical_key == ingestion_attachment_canonical_key(att.id),
+                    )
+                )
+            ).scalar_one_or_none()
+        return None
 
     async def _upsert_person_from_addr(
         self,

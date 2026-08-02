@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from legalbot.memory.ontology import (
     EntityType,
+    infer_entity_type_from_name,
     normalize_name,
+    organization_canonical_key,
+    contract_canonical_key,
     parse_email_address,
     person_canonical_key,
     person_canonical_name,
@@ -42,3 +45,13 @@ def test_entity_and_relation_enums_cover_legal_ontology() -> None:
     assert EntityType.CONTRACT == "Contract"
     assert Relation.REPLIES_TO == "REPLIES_TO"
     assert Relation.PARTY_TO == "PARTY_TO"
+
+
+def test_infer_entity_type_from_name() -> None:
+    assert infer_entity_type_from_name("Acme Corp") == EntityType.ORGANIZATION
+    assert infer_entity_type_from_name("Jane Doe") == EntityType.PERSON
+
+
+def test_organization_and_contract_canonical_keys() -> None:
+    assert organization_canonical_key("Acme Corp") == "name:acme corp"
+    assert contract_canonical_key("NDA", ["Acme Corp", "Jane Doe"]).startswith("contract:nda|")
