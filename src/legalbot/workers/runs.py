@@ -292,6 +292,7 @@ async def _invoke_graph(
         else:
             await _mark_run_status(run_id, RunStatus.completed)
             await _finalize_job_if_primary(session_id, run_id)
+            await _enqueue_graph_index_run(run_id)
         return True
     except Exception as e:
         log.exception("graph.invoke_failed", run_id=str(run_id), error=str(e))
@@ -515,6 +516,23 @@ async def _mark_run_status(run_id: uuid.UUID, status: RunStatus) -> None:
             .values(status=str(session_status))
         )
         await db.commit()
+
+
+async def _enqueue_graph_index_run(run_id: uuid.UUID) -> None:
+    from legalbot.core.config import get_settings
+
+    if not get_settings().KG_ENABLED:
+        return
+
+    sm = async_session_factory()
+    async with sm() as db:
+        run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
+        if run is None or run.kind != RunKind.pipeline:
+            return
+
+    from legalbot.workers.graph import graph_index_run
+
+    graph_index_run.delay(str(run_id))
 
 
 async def _release_concurrency_budget(job_id: uuid.UUID) -> None:

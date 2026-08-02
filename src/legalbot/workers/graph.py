@@ -36,3 +36,27 @@ async def _graph_index_item(ingestion_item_id: str) -> dict:
         await db.commit()
         log.info("graph.index_item", ingestion_item_id=ingestion_item_id, **result)
         return result
+
+
+@celery_app.task(name="legalbot.workers.graph.graph_index_run", bind=True)
+def graph_index_run(self, run_id: str) -> dict:
+    return run_async(_graph_index_run(run_id))
+
+
+async def _graph_index_run(run_id: str) -> dict:
+    settings = get_settings()
+    if not settings.KG_ENABLED:
+        return {"ok": False, "reason": "disabled"}
+
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        return {"ok": False, "reason": "invalid_id"}
+
+    sm = async_session_factory()
+    async with sm() as db:
+        svc = KnowledgeGraphService(db)
+        result = await svc.index_run(run_uuid)
+        await db.commit()
+        log.info("graph.index_run", run_id=run_id, **result)
+        return result

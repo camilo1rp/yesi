@@ -494,12 +494,52 @@ dev deps or mount `tests/` and install pytest in the test job (see `docker-compo
 
 ---
 
-## Future QA (Phase 2+)
+## Future QA (Phase 3+)
 
 When implementing later phases, extend this doc with:
 
-- **Phase 2:** `graph_index_run` after pipeline; `Organization` / `Contract` nodes from
-  `analysis/extracted`; entity merge cases
 - **Phase 3:** `SUPERSEDES` + `valid_to` before/after second contract ingest
 - **Phase 4:** Contract subgraph calls `get_entity_context`; validation uses ingested
   contracts instead of static examples; `KnowledgeGraphMiddleware` prompt injection
+
+---
+
+## Phase 2 QA — `graph_index_run` (artifact projection)
+
+After a **completed** pipeline job (`KG_ENABLED=true`):
+
+### Worker logs
+
+- [ ] `graph.index_item` at ingest (Phase 1)
+- [ ] `graph.index_run` after job `completed` with `entities_upserted` > 0
+
+### SQL (owner `qa-user` or test owner)
+
+```sql
+-- Org / person / contract from analysis/summary + extracted_data
+SELECT type, canonical_name FROM kg_entity
+WHERE owner_user_id = 'qa-user' AND type IN ('Organization', 'Person', 'Contract')
+ORDER BY type, canonical_name;
+
+-- Artifact anchor documents
+SELECT canonical_name, attributes->>'artifact_key' AS artifact_key
+FROM kg_entity
+WHERE owner_user_id = 'qa-user' AND type = 'Document'
+  AND (attributes->>'doc_kind' LIKE 'analysis%'
+       OR attributes->>'doc_kind' = 'extracted_data');
+
+-- Party and anchor edges
+SELECT relation, COUNT(*) FROM kg_edge WHERE owner_user_id = 'qa-user'
+GROUP BY relation ORDER BY relation;
+```
+
+### Search
+
+- [ ] `search_related_docs` with query `Acme` returns the ingestion item handle
+  (Phase 2 org projection + mentions on `ingestion_item`)
+
+### Automated
+
+```bash
+uv run pytest tests/test_kg_ontology.py tests/test_kg_service.py tests/test_kg_phase2.py -q
+```

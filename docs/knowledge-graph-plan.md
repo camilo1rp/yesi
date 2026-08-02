@@ -161,21 +161,27 @@ Creates, idempotently (upsert on canonical key + edge uniqueness):
 
 Zero LLM cost; immediately useful for "all mail from Jane" / thread views.
 
-### Phase 2 — LLM entity projection
+### Phase 2 — LLM entity projection ✅
 
 Hook: `graph_index_run(run_id)` task enqueued when a pipeline `Run` finishes
-successfully. Reads the `analysis/extracted` and `analysis/summary` artifacts
-plus per-attachment `extracted_data/*` artifacts (they already contain
-`entities` lists) and:
+successfully (`runs.py` → Celery). Implemented in `legalbot/memory/extraction.py`
+and `KnowledgeGraphService.index_run`.
 
-1. Extracts typed entities via structured output validated by the ontology
-   Pydantic models (reuse `SUMMARIZATION_MODEL` — haiku — to keep cost down).
-2. Resolves entities: exact canonical key → alias trgm match → embedding
-   similarity (threshold-configurable); ambiguous merges are logged, not merged.
-3. Upserts `kg_entity` + `kg_mention` + edges (`PARTY_TO`, `CONCERNS`,
-   `REFERENCES`, …) with provenance to the artifact and run.
-4. Contract artifacts (`contracts/draft`) additionally produce `Contract` nodes
-   with `PARTY_TO`, `SIGNED_BY`, `GOVERNED_BY`, `HAS_DEADLINE` edges.
+Reads `analysis/extracted`, `analysis/summary`, `extracted_data/*`,
+`contracts/draft` artifacts and:
+
+1. Deterministic projection: entities from `extracted_data.entities`,
+   `contract_request`, `contracts/draft` field values.
+2. Artifact anchors: `Document` nodes for analysis artifacts linked to source
+   files via `REFERENCES` (summary → extraction → `extracted_data/*`).
+3. Optional LLM enrichment when `KG_LLM_EXTRACTION_ENABLED=true` (Haiku +
+   structured output).
+4. Entity resolution: exact `canonical_key` → pg_trgm alias/name merge → create.
+5. Upserts `kg_entity` + `kg_mention` + edges (`PARTY_TO`, `CONCERNS`,
+   `REFERENCES`, …) with provenance to the run and ingestion item.
+
+Deferred to later: backlog `graph_index_backfill` task, embedding merge at
+`KG_MERGE_EMBED_THRESHOLD`, HNSW index on `kg_entity.embedding`.
 
 ### Phase 3 — Entity resolution & temporal consistency
 
