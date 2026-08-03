@@ -52,16 +52,17 @@ async def _add_email_item(
 
 @pytest.mark.asyncio
 async def test_upsert_entity_is_idempotent(db_session) -> None:
+    owner = "user-upsert-isolated"
     svc = KnowledgeGraphService(db_session)
     first = await svc.upsert_entity(
-        owner_user_id=OWNER_A,
+        owner_user_id=owner,
         entity_type=EntityType.PERSON,
         canonical_key="email:jane@acme.com",
         canonical_name="Jane Doe",
         attributes={"email": "jane@acme.com"},
     )
     second = await svc.upsert_entity(
-        owner_user_id=OWNER_A,
+        owner_user_id=owner,
         entity_type=EntityType.PERSON,
         canonical_key="email:jane@acme.com",
         canonical_name="Jane D.",
@@ -72,7 +73,7 @@ async def test_upsert_entity_is_idempotent(db_session) -> None:
 
     count = (
         await db_session.execute(
-            select(func.count()).select_from(KgEntity).where(KgEntity.owner_user_id == OWNER_A)
+            select(func.count()).select_from(KgEntity).where(KgEntity.owner_user_id == owner)
         )
     ).scalar_one()
     assert count == 1
@@ -170,9 +171,10 @@ async def test_search_related_isolates_tenants(db_session) -> None:
 
 @pytest.mark.asyncio
 async def test_replies_to_via_provider_message_id(db_session) -> None:
+    owner = "user-replies-isolated"
     parent = await _add_email_item(
         db_session,
-        owner=OWNER_A,
+        owner=owner,
         external_id="parent-msg",
         title="Original thread",
         from_addr="jane@acme.com",
@@ -181,7 +183,7 @@ async def test_replies_to_via_provider_message_id(db_session) -> None:
     )
     child = await _add_email_item(
         db_session,
-        owner=OWNER_A,
+        owner=owner,
         external_id="child-msg",
         title="Re: Original thread",
         from_addr="jane@acme.com",
@@ -193,11 +195,6 @@ async def test_replies_to_via_provider_message_id(db_session) -> None:
     await svc.index_ingestion_item(parent.id)
     await svc.index_ingestion_item(child.id)
 
-    edge = (
-        await db_session.execute(
-            select(KgEdge).where(KgEdge.relation == Relation.REPLIES_TO)
-        )
-    ).scalar_one()
     child_email = (
         await db_session.execute(
             select(KgEntity).where(
@@ -209,6 +206,16 @@ async def test_replies_to_via_provider_message_id(db_session) -> None:
         await db_session.execute(
             select(KgEntity).where(
                 KgEntity.canonical_key == f"ingestion_item:{parent.id}",
+            )
+        )
+    ).scalar_one()
+    edge = (
+        await db_session.execute(
+            select(KgEdge).where(
+                KgEdge.owner_user_id == owner,
+                KgEdge.relation == Relation.REPLIES_TO,
+                KgEdge.src_id == child_email.id,
+                KgEdge.dst_id == parent_email.id,
             )
         )
     ).scalar_one()

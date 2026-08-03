@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from datetime import UTC
 from typing import Any
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -27,8 +29,11 @@ def event_loop():
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    database_url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(database_url, future=True)
     async with engine.begin() as conn:
+        if database_url.startswith("postgresql"):
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.create_all)
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with sm() as session:

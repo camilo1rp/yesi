@@ -52,7 +52,7 @@ def test_build_stage_result_marks_last_human_tool_as_awaiting_human() -> None:
             ]
         },
         stage="analyze",
-        primary_artifact_key="analysis/summary",
+        primary_artifact_key="analysis/report",
         next_stage="act",
     )
 

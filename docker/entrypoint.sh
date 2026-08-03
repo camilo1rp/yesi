@@ -13,8 +13,16 @@ case "${ROLE}" in
     exec celery -A legalbot.workers.celery_app:celery_app worker \
       --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-4}" "$@"
     ;;
+  worker-watch)
+    exec python /app/docker/watch_src.py celery -A legalbot.workers.celery_app:celery_app worker \
+      --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-4}" "$@"
+    ;;
   beat)
     exec celery -A legalbot.workers.celery_app:celery_app beat \
+      --loglevel=INFO --scheduler redbeat.RedBeatScheduler "$@"
+    ;;
+  beat-watch)
+    exec python /app/docker/watch_src.py celery -A legalbot.workers.celery_app:celery_app beat \
       --loglevel=INFO --scheduler redbeat.RedBeatScheduler "$@"
     ;;
   migrate)

@@ -1,24 +1,26 @@
 """Independent StateGraph for the extract stage.
 
-Extracts structured facts from email and attachments using:
-- fetch_email tool
-- run_attachment_extraction tool
-- analyze_image tool
-- write_artifact tool
+Materializes attachment artifacts via tools, then deterministically writes a rich
+``analysis/extracted`` inventory in finalize for the analyze stage.
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
-from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from legalbot.agents.extract_inventory import (
+    build_extract_inventory,
+    build_extract_stage_result,
+    write_extract_inventory,
+)
+from legalbot.agents.models import init_stage_model
 from legalbot.agents.prompts import EXTRACT_PROMPT
 from legalbot.agents.stage_messages import prepare_stage_messages
-from legalbot.agents.stage_result import build_stage_result
 from legalbot.agents.state import (
     ExtractOutputState,
     InputState,
@@ -31,7 +33,8 @@ from legalbot.agents.tools import (
     run_attachment_extraction,
     write_artifact,
 )
-from legalbot.agents.models import stage_model
+from legalbot.artifacts.service import ArtifactService
+from legalbot.db.session import async_session_factory
 
 _EXTRACT_TOOLS = [
     fetch_email,
@@ -42,11 +45,23 @@ _EXTRACT_TOOLS = [
 ]
 
 
+def _session_uuid(state: LegalEmailState) -> uuid.UUID:
+    sid = state.get("session_id")
+    if not sid:
+        raise RuntimeError("extract graph invoked without session_id")
+    return uuid.UUID(sid)
+
+
+def _run_uuid(state: LegalEmailState) -> uuid.UUID | None:
+    rid = state.get("run_id")
+    return uuid.UUID(rid) if rid else None
+
+
 def build_extract_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the extract StateGraph with input/output schemas."""
-    model = init_chat_model(stage_model("extract")).bind_tools(_EXTRACT_TOOLS)
+    model = init_stage_model("extract").bind_tools(_EXTRACT_TOOLS)
 
     def extract_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for extraction - calls tools to extract facts."""
@@ -57,16 +72,28 @@ def build_extract_graph(
         )
         return {"messages": [model.invoke(messages)]}
 
-    def finalize_node(state: LegalEmailState) -> dict[str, Any]:
-        """Project durable artifact work into the orchestrator handoff."""
-        return {
-            "stage_result": build_stage_result(
-                state,
-                stage="extract",
-                primary_artifact_key="analysis/extracted",
-                next_stage="analyze",
-            )
-        }
+    async def finalize_node(state: LegalEmailState) -> dict[str, Any]:
+        """Write enriched inventory artifact and project stage handoff."""
+        session_id = _session_uuid(state)
+        run_id = _run_uuid(state)
+        sm = async_session_factory()
+        async with sm() as db:
+            art_svc = ArtifactService(db)
+            inventory = await build_extract_inventory(art_svc, session_id)
+            if not inventory.get("error"):
+                await write_extract_inventory(
+                    art_svc,
+                    session_id=session_id,
+                    run_id=run_id,
+                    inventory=inventory,
+                )
+            await db.commit()
+
+        stage_result = build_extract_stage_result(state)
+        if inventory.get("error"):
+            stage_result["summary"] = str(inventory["error"])
+            stage_result["primary_artifact_key"] = None
+        return {"stage_result": stage_result}
 
     builder = StateGraph(
         LegalEmailState,
@@ -74,12 +101,10 @@ def build_extract_graph(
         output_schema=ExtractOutputState,
     )
 
-    # Add nodes
     builder.add_node("extract", extract_node)
     builder.add_node("tools", ToolNode(_EXTRACT_TOOLS))
     builder.add_node("finalize", finalize_node)
 
-    # Add edges
     builder.add_edge(START, "extract")
     builder.add_conditional_edges(
         "extract",
@@ -92,7 +117,6 @@ def build_extract_graph(
     builder.add_edge("tools", "extract")
     builder.add_edge("finalize", END)
 
-    # Compile with checkpointer
     return builder.compile(checkpointer=checkpointer)
 
 

@@ -90,11 +90,42 @@ async def _resolve_attachment(
     return None
 
 
+async def _skip_if_artifact_exists(
+    art_svc: Any,
+    session_id: uuid.UUID,
+    key: str,
+    *,
+    preview_key: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a skip payload when ``key`` already exists for this session."""
+    from legalbot.artifacts.service import ArtifactNotFound
+
+    try:
+        _, content = await art_svc.read(session_id=session_id, key_or_id=key)
+    except ArtifactNotFound:
+        return None
+
+    payload: dict[str, Any] = {"already_extracted": True}
+    if preview_key:
+        try:
+            _, preview_content = await art_svc.read(session_id=session_id, key_or_id=preview_key)
+            payload["preview"] = str(preview_content)[:500]
+        except ArtifactNotFound:
+            payload["preview"] = ""
+    if isinstance(content, dict):
+        payload["findings"] = content
+    return payload
+
+
 @tool
 async def fetch_email(
     state: Annotated[dict, InjectedState] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """Return the email metadata bound to this session's processing job."""
+    """Return the email metadata bound to this session's processing job.
+
+    The ``attachments`` list includes a UUID ``id`` for each file — pass that exact
+    ``id`` (not the filename) to ``run_attachment_extraction`` and ``analyze_image``.
+    """
     state = state or {}
     sm = async_session_factory()
     async with sm() as db:
@@ -163,6 +194,10 @@ async def run_attachment_extraction(
 ) -> dict[str, Any]:
     """Extract text and structured data from a PDF/DOCX/XLSX attachment.
 
+    ``attachment_id`` must be the UUID ``id`` from ``fetch_email().attachments[]``
+    (not the filename). If this attachment was already extracted in this session,
+    returns existing artifact keys without re-running extraction.
+
     Writes two artifacts per attachment (mirroring the attachment-processor stage):
       - ``extracted_text/<filename>``  — plain extracted text (kind=extracted_text)
       - ``extracted_data/<filename>``  — structured JSON envelope with summary,
@@ -172,11 +207,8 @@ async def run_attachment_extraction(
     can decide whether to read the full artifact.
     """
     state = state or {}
-    from sqlalchemy import select
-
     from legalbot.artifacts.service import ArtifactService
     from legalbot.attachments.dispatcher import extract
-    from legalbot.db.models import IngestionAttachment
 
     sm = async_session_factory()
     async with sm() as db:
@@ -185,6 +217,23 @@ async def run_attachment_extraction(
             return {"error": f"attachment not found: {attachment_id}"}
 
         filename = att.name or "attachment"
+
+        art_svc = ArtifactService(db)
+        session_id = _session_id(state)
+        data_key = f"extracted_data/{filename}"
+        text_key = f"extracted_text/{filename}"
+        skipped = await _skip_if_artifact_exists(
+            art_svc, session_id, data_key, preview_key=text_key
+        )
+        if skipped is not None:
+            skipped.update(
+                {
+                    "text_artifact_key": text_key,
+                    "data_artifact_key": data_key,
+                    "source_file": filename,
+                }
+            )
+            return skipped
 
         if att.raw_uri:
             from legalbot.artifacts.blobstore import get_blob_store
@@ -212,9 +261,7 @@ async def run_attachment_extraction(
         if not result.ok:
             structured["error"] = result.error
 
-        art_svc = ArtifactService(db)
         run_id = uuid.UUID(state["run_id"]) if state.get("run_id") else None
-        session_id = _session_id(state)
         meta = {"attachment_id": str(att.id), "source_file": filename}
 
         text_ref = await art_svc.write(
@@ -253,6 +300,9 @@ async def analyze_image(
 ) -> dict[str, Any]:
     """Vision-LLM analysis of an image attachment (PNG/JPG/GIF/WEBP).
 
+    ``attachment_id`` must be the UUID ``id`` from ``fetch_email().attachments[]``
+    (not the filename). Skips re-analysis when ``image_analysis/<name>`` already exists.
+
     Writes one artifact:
       - ``image_analysis/<filename>`` — JSON with summary, entities, key_findings,
         and source_file (kind=image_analysis)
@@ -260,12 +310,9 @@ async def analyze_image(
     Use this instead of ``run_attachment_extraction`` for any image MIME type.
     """
     state = state or {}
-    from sqlalchemy import select
-
     from legalbot.artifacts.blobstore import get_blob_store
     from legalbot.artifacts.service import ArtifactService
     from legalbot.attachments.vision import analyze_image as vision_analyze
-    from legalbot.db.models import IngestionAttachment
 
     sm = async_session_factory()
     async with sm() as db:
@@ -274,6 +321,19 @@ async def analyze_image(
             return {"error": f"attachment not found: {attachment_id}"}
 
         filename = att.name or "image"
+        art_svc = ArtifactService(db)
+        session_id = _session_id(state)
+        analysis_key = f"image_analysis/{filename}"
+        skipped = await _skip_if_artifact_exists(art_svc, session_id, analysis_key)
+        if skipped is not None:
+            skipped.update(
+                {
+                    "artifact_key": analysis_key,
+                    "source_file": filename,
+                }
+            )
+            return skipped
+
         data = await get_blob_store().get(att.raw_uri) if att.raw_uri else b""
         findings = await vision_analyze(
             data,
@@ -296,9 +356,8 @@ async def analyze_image(
             }
         findings.setdefault("source_file", filename)
 
-        art_svc = ArtifactService(db)
         ref = await art_svc.write(
-            session_id=_session_id(state),
+            session_id=session_id,
             key=f"image_analysis/{filename}",
             content=findings,
             kind="image_analysis",
@@ -403,8 +462,12 @@ async def send_draft(
 
     sm = async_session_factory()
     async with sm() as db:
+        try:
+            draft_uuid = uuid.UUID(draft_id)
+        except ValueError:
+            return {"error": f"invalid draft_id: expected UUID, got {draft_id!r}"}
         draft = (
-            await db.execute(select(Draft).where(Draft.id == uuid.UUID(draft_id)))
+            await db.execute(select(Draft).where(Draft.id == draft_uuid))
         ).scalar_one()
         row = (
             await db.execute(

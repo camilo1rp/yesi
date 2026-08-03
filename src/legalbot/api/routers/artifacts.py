@@ -56,7 +56,7 @@ async def get_artifact(
     db: AsyncSession = Depends(get_session),
 ) -> ArtifactContent:
     try:
-        row, content = await ArtifactService(db).read(
+        row, content = await ArtifactService(db).read_resolved(
             session_id=session_id, key_or_id=key, version=version
         )
     except ArtifactNotFound as e:

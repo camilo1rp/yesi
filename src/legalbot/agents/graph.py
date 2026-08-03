@@ -17,7 +17,7 @@ from legalbot.agents.prompts import (
 )
 from legalbot.agents.state import AgentState
 from legalbot.agents.subagents import build_compiled_subagents
-from legalbot.agents.tools import list_artifacts, read_artifact, search_related_docs, send_draft
+from legalbot.agents.tools import list_artifacts, read_artifact, send_draft
 from legalbot.core.config import get_settings
 from legalbot.core.logging import get_logger
 from legalbot.interrupts.tools import ask_human, request_human_approval
@@ -52,9 +52,10 @@ async def build_agent() -> tuple[Any, Any]:
         SummarizationMiddleware,
         TodoListMiddleware,
     )
-    from langchain.chat_models import init_chat_model
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from langgraph.store.postgres.aio import AsyncPostgresStore
+
+    from legalbot.agents.models import init_stage_model
 
     # One AsyncPostgresSaver for the whole process is intentional: stage isolation
     # is (thread_id, checkpoint_ns), not separate saver instances. Subagents bind
@@ -74,12 +75,11 @@ async def build_agent() -> tuple[Any, Any]:
     await store.setup()
 
     memory_tools = build_memory_tools()
-    main_model = init_chat_model(settings.AGENT_MODEL)
+    main_model = init_stage_model("orchestrator")
 
     native_tools = [
         read_artifact,
         list_artifacts,
-        search_related_docs,
         send_draft,
         ask_human,
         request_human_approval,
@@ -91,7 +91,7 @@ async def build_agent() -> tuple[Any, Any]:
 
     middleware: list[Any] = [
         SummarizationMiddleware(
-            model=settings.SUMMARIZATION_MODEL,
+            model=init_stage_model("summarization"),
             trigger=("tokens", 60_000),
             keep=("messages", 30),
         ),

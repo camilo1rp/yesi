@@ -352,9 +352,9 @@ Follow [`getting-started.md`](getting-started.md) §5.3–§5.6 with `qa-inbox` 
 
 ### Expected artifacts (minimum)
 
-- [ ] `analysis/extracted`
-- [ ] `analysis/summary`
-- [ ] Either `drafts/reply` or `act/outcome` depending on intent
+- [ ] `analysis/extracted` — rich inventory (`provided_overview`, per-attachment previews)
+- [ ] `analysis/report` — analyze decision (`action`, `intention`, `action_payload`)
+- [ ] Either `drafts/reply` or `act/outcome` depending on `report.action`
 
 ### Expected graph (parallel)
 
@@ -427,8 +427,9 @@ curl -s -X POST http://localhost:8000/api/admin/inject-fake \
 
 ### Agent checks (LLM-dependent)
 
-- [ ] `analysis/summary` on second job: `intent_classification` = `create_contract`
-- [ ] Orchestrator may call `search_related_docs` (observability)
+- [ ] `analysis/report` on second job: `action` = `create_contract`
+- [ ] `analysis/extracted` includes `provided_overview` and processed attachment rows
+- [ ] Analyze stage runs KG `search_related_docs` internally (not orchestrator)
 - [ ] `contracts/draft` artifact may appear after `draft_contract` subagent (requires complete fields or `ask_human`)
 
 **Phase 1 pass:** graph + ingest + analyze path works; **Phase 4 pass:** draft subagent
@@ -444,9 +445,10 @@ During any E2E run, confirm:
 |--------|-------|----------|
 | `ingest.done` | worker logs | `item_id`, `job_id` |
 | `graph.index_item` | worker logs | `ok: true` |
+| `subagent.ainvoke` | worker logs | `extract`, `analyze`, `draft_contract`, … |
 | `job.transition` | worker logs / metrics | No stuck `processing` > `PROCESSING_LEASE_SEC` |
 | `GET /api/jobs/{id}` | API | `current_session_id` set while running |
-| `GET /api/sessions/{id}/artifacts` | API | Growing artifact list through stages |
+| `GET /api/sessions/{id}/artifacts` | API | `analysis/extracted` → `analysis/report` → contract artifacts |
 | LangSmith | optional | Stage subgraphs + tool calls |
 
 ---
@@ -460,7 +462,7 @@ Run before release:
 uv run pytest tests/test_kg_ontology.py tests/test_kg_service.py -q
 
 # Full suite with Postgres + Redis
-docker compose -f docker-compose.test.yml run --rm tests
+docker compose -f docker-compose.yml -f docker-compose.test.yml run --rm tests pytest -q
 ```
 
 Note: production Docker image installs `--no-dev` — CI test container should include
@@ -507,10 +509,12 @@ HITL interrupts, and post-completion `graph_index_run`.
 |-------|---------------------|
 | Ingest | `graph.index_item` → Email, Person, Attachment, `SENT_BY`, `ATTACHED_TO` |
 | Thread | Parent + child emails → `REPLIES_TO` |
-| Pipeline | `analysis/extracted`, `analysis/summary`, `extracted_data/*`, `drafts/reply` |
+| Extract | `extracted_text/*`, `extracted_data/*`, `image_analysis/*`, enriched `analysis/extracted` |
+| Analyze | `analysis/report` with `action=create_contract` and contract `action_payload` |
+| Contract | `contracts/draft`, `contracts/review` after `draft_contract` + `validate_contract` |
 | HITL | Auto-resolves `review_draft`, `tool_approval`, and `information_request` until job `completed` |
 | Phase 2 | `graph.index_run` → Organization, Person, Contract, `PARTY_TO`, `CONCERNS` |
-| Anchors | `Document` nodes for `analysis/summary` → `extracted_data/*` |
+| Anchors | `Document` nodes for `analysis/report` → `extracted_data/*` |
 | Search | SQL: Acme org + mention on child `ingestion_item` |
 | Tool routing | Child has DOCX → `run_attachment_extraction` + PNG → `analyze_image` |
 
@@ -529,8 +533,8 @@ Narrative lives in `scripts/qa/fixture_content.py` (shared with unit tests via
 | **CC `jane@acme.com`** | Extra Person node in KG for `search_related_docs("jane")` |
 
 After child pipeline **completes**, `graph_index_run` projects Organization/Person/Contract
-from `analysis/summary` + `extracted_data/*` so `search_related_docs("Acme")` returns
-the child ingestion item with party context.
+from `analysis/report` + `extracted_data/*` so analyze-time `search_related_docs("Acme")`
+can surface related thread context.
 
 **Note:** Parent job is ingest-only (no full pipeline) to save LLM cost; thread context
 for the child comes from email bodies + `REPLIES_TO` + child’s own extraction artifacts.
@@ -566,8 +570,10 @@ Script exits `0` and reports PASS for:
 
 - API health + fixtures
 - Parent ingest + `graph.index_item` (thread seed; full job completion not required)
-- Child job `completed` (full pipeline + `graph.index_run`)
-- Child artifacts: `analysis/extracted`, `analysis/summary`, `extracted_data/*`, `image_analysis/*`
+- Child job `completed` (extract → analyze → contract flow + `graph_index_run`)
+- Child artifacts: `analysis/extracted` (with `provided_overview`), `analysis/report`,
+  `extracted_data/*`, `extracted_text/*`, `image_analysis/*`, `contracts/draft`, `contracts/review`
+- No legacy `analysis/summary` artifact
 - SQL: ≥1 `Organization`, ≥1 `Contract`, ≥2 `PARTY_TO`, ≥1 `REPLIES_TO`
 - ≥1 analysis `Document` anchor
 - Acme-related mention on child ingestion item
@@ -579,11 +585,14 @@ Script exits `0` and reports PASS for:
 # Child session artifacts
 curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts" | jq '[.[].key]'
 
-# Read analysis summary JSON
-curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts/analysis/summary" | jq
+# Extract inventory (what analyze consumes)
+curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts/analysis/extracted" | jq '.content | {provided_overview, attachments_processed, attachments}'
+
+# Analyze report (routing decision)
+curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts/analysis/report" | jq '.content | {action, intention, action_payload, confidence}'
 ```
 
-Inspect `intent_classification` — often `create_contract` on the child message
+Inspect `analysis/report.action` — expect `create_contract` on the child fixture
 (LLM-dependent).
 
 ### Troubleshooting
@@ -593,11 +602,13 @@ Inspect `intent_classification` — often `create_contract` on the child message
 | `fixtures missing` | Run `python3 scripts/qa/generate_kg_fixtures.py` (needs `python-docx` in host env) |
 | Job `failed` | Fresh `provider_message_id` each run (script uses timestamp); check worker logs |
 | No `graph.index_run` | Job must reach `completed`; rebuild worker after merge |
-| No `Organization` | Pipeline must finish analyze; check `analysis/summary` exists |
+| No `Organization` | Pipeline must finish analyze; check `analysis/report` exists |
+| No `provided_overview` | Rebuild worker after extract inventory changes; check `analysis/extracted` JSON |
 | Timeout | Increase loop in script or check API keys / model errors in worker |
 | Stuck `awaiting_human` | Script auto-resolves `information_request`, `review_draft`, and `tool_approval`; check interrupt kind in DB |
+| `information_request` 422 | Answer must match schema: use `{"answer":{"answer":"<text>"}}` not flat field keys |
 | Anthropic credit error | Add credits, switch stage models to OpenAI in `.env`, or set `REFLECTION_ENABLED=false` for QA |
-| High API call volume | Run `./scripts/qa/estimate_run_cost.sh`; tier models via `EXTRACT_MODEL` / `ANALYZE_MODEL` (see `.env.example`) |
+| High API call volume | Run `./scripts/qa/estimate_run_cost.sh`; tier models via `EXTRACT_MODEL`, `ANALYZE_RESEARCH_MODEL`, `ANALYZE_DECIDE_MODEL` (see `.env.example`) |
 
 ---
 
@@ -621,7 +632,7 @@ After a **completed** pipeline job (`KG_ENABLED=true`):
 ### SQL (owner `qa-user` or test owner)
 
 ```sql
--- Org / person / contract from analysis/summary + extracted_data
+-- Org / person / contract from analysis/report + extracted_data
 SELECT type, canonical_name FROM kg_entity
 WHERE owner_user_id = 'qa-user' AND type IN ('Organization', 'Person', 'Contract')
 ORDER BY type, canonical_name;

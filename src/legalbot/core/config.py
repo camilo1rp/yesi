@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "anthropic:claude-sonnet-4-5"
     EXTRACT_MODEL: str = "anthropic:claude-haiku-4-5"
     ANALYZE_MODEL: str = "anthropic:claude-haiku-4-5"
+    ANALYZE_RESEARCH_MODEL: str | None = None
+    ANALYZE_DECIDE_MODEL: str | None = None
+    ANALYZE_MAX_RESEARCH_STEPS: int = 12
     ACT_MODEL: str = "anthropic:claude-haiku-4-5"
     CONTRACT_MODEL: str = "anthropic:claude-sonnet-4-5"
     CONTRACT_VALIDATION_MODEL: str = "anthropic:claude-haiku-4-5"
@@ -68,6 +71,11 @@ class Settings(BaseSettings):
     STAGE_RECURSION_LIMIT_EXTRACT_NONE: int = 8
     STAGE_RECURSION_LIMIT_EXTRACT_SMALL: int = 12
     STAGE_RECURSION_LIMIT_EXTRACT_LARGE: int = 20
+
+    # LLM resilience (429 / transient provider errors)
+    LLM_MAX_RETRIES: int = 6
+    LLM_REQUESTS_PER_SECOND: float = 2.0
+    LLM_MAX_BUCKET_SIZE: int = 5
 
     # Provider credentials
     ANTHROPIC_API_KEY: SecretStr | None = None

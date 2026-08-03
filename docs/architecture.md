@@ -150,7 +150,7 @@ Each stage is an independent `StateGraph` compiled with the **same** `AsyncPostg
 | Stage | `checkpoint_ns` prefix | Primary Artifact Key | Next Stage |
 |-------|------------------------|---------------------|------------|
 | `extract` | `extract:` | `analysis/extracted` | `analyze` |
-| `analyze` | `analyze:` | `analysis/summary` | `act` |
+| `analyze` | `analyze:` | `analysis/report` | `act` or `draft_contract` |
 | `act` | `act:` | `act/outcome` or `drafts/reply` | `reflection` |
 | `reflection` | `reflection:` | (none, writes to memory store) | `null` |
 
@@ -182,8 +182,8 @@ Each `finalize` node produces a deterministic `StageResult`:
     "stage": "analyze",
     "status": "completed",          # or "awaiting_human"
     "summary": "...",
-    "primary_artifact_key": "analysis/summary",
-    "artifact_keys": ["analysis/extracted", "analysis/summary"],
+    "primary_artifact_key": "analysis/report",
+    "artifact_keys": ["analysis/extracted", "analysis/report"],
     "needs_human": False,
     "next_stage": "act",            # null if awaiting_human or reflection
 }

@@ -21,7 +21,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from legalbot.artifacts.blobstore import BlobStore, get_blob_store
+from legalbot.artifacts.keys import artifact_key_candidates
 from legalbot.artifacts.models import ArtifactRef
+from legalbot.db.models import EmailMetadata, IngestionItem, ProcessingJob
+from legalbot.db.models import Session as SessionRow
 from legalbot.core import metrics
 from legalbot.core.config import get_settings
 from legalbot.core.logging import get_logger
@@ -203,6 +206,33 @@ class ArtifactService:
             summary=(metadata or {}).get("summary"),
         )
 
+    async def session_ids_in_email_thread(self, session_id: uuid.UUID) -> list[uuid.UUID]:
+        """Primary sessions for every ingestion item in the same email thread."""
+        thread_result = await self.db.execute(
+            select(EmailMetadata.provider_thread_id)
+            .join(IngestionItem, IngestionItem.id == EmailMetadata.ingestion_item_id)
+            .join(ProcessingJob, ProcessingJob.ingestion_item_id == IngestionItem.id)
+            .join(SessionRow, SessionRow.job_id == ProcessingJob.id)
+            .where(SessionRow.id == session_id)
+        )
+        provider_thread_id = thread_result.scalar_one_or_none()
+        if not provider_thread_id:
+            return [session_id]
+
+        result = await self.db.execute(
+            select(SessionRow.id)
+            .join(ProcessingJob, ProcessingJob.id == SessionRow.job_id)
+            .join(IngestionItem, IngestionItem.id == ProcessingJob.ingestion_item_id)
+            .join(EmailMetadata, EmailMetadata.ingestion_item_id == IngestionItem.id)
+            .where(
+                EmailMetadata.provider_thread_id == provider_thread_id,
+                SessionRow.kind == "primary",
+            )
+            .order_by(SessionRow.created_at)
+        )
+        ids = list(result.scalars().all())
+        return ids if ids else [session_id]
+
     async def read(
         self,
         *,
@@ -233,6 +263,42 @@ class ArtifactService:
         if row.mime == "application/json":
             return row, json.loads(data)
         return row, data
+
+    async def read_resolved(
+        self,
+        *,
+        session_id: uuid.UUID,
+        key_or_id: str | uuid.UUID,
+        version: int | None = None,
+        thread_fallback: bool = True,
+    ) -> tuple[Artifact, Any]:
+        """Read by key with filename normalization and optional same-thread session fallback."""
+        if isinstance(key_or_id, uuid.UUID):
+            return await self.read(session_id=session_id, key_or_id=key_or_id, version=version)
+
+        candidates = artifact_key_candidates(str(key_or_id))
+        if not candidates:
+            raise ArtifactNotFound(f"artifact {key_or_id!r} not found")
+
+        for key in candidates:
+            try:
+                return await self.read(session_id=session_id, key_or_id=key, version=version)
+            except ArtifactNotFound:
+                continue
+
+        if not thread_fallback:
+            raise ArtifactNotFound(f"artifact {key_or_id!r} not found")
+
+        for sibling_id in await self.session_ids_in_email_thread(session_id):
+            if sibling_id == session_id:
+                continue
+            for key in candidates:
+                try:
+                    return await self.read(session_id=sibling_id, key_or_id=key, version=version)
+                except ArtifactNotFound:
+                    continue
+
+        raise ArtifactNotFound(f"artifact {key_or_id!r} not found")
 
     async def update(
         self,

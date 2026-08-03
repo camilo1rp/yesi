@@ -87,13 +87,11 @@ class KnowledgeGraphService:
                         "updated_at": now,
                     },
                 )
-                .returning(KgEntity.id)
+                .returning(KgEntity)
             )
             result = await self.db.execute(stmt)
-            entity_id = result.scalar_one()
-            row = (
-                await self.db.execute(select(KgEntity).where(KgEntity.id == entity_id))
-            ).scalar_one()
+            row = result.scalar_one()
+            await self.db.refresh(row)
         else:
             existing = (
                 await self.db.execute(
@@ -431,7 +429,7 @@ class KnowledgeGraphService:
             return {"ok": False, "reason": "email_entity_missing"}
 
         artifacts = await self._load_session_artifacts(run.session_id)
-        if not artifacts.get("analysis/summary") and not artifacts.get("analysis/extracted"):
+        if not artifacts.get("analysis/report") and not artifacts.get("analysis/extracted"):
             log.info(
                 "graph.index_run.no_analysis_artifacts",
                 run_id=str(run_id),

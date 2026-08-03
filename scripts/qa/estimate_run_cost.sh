@@ -27,4 +27,4 @@ $COMPOSE logs worker 2>&1 | grep "subagent.ainvoke" | sed 's/.*stage=//' | sort 
 
 echo
 echo "Tip: set LANGSMITH_API_KEY for per-run token/cost breakdown."
-echo "Active models: $($COMPOSE exec -T worker printenv AGENT_MODEL EXTRACT_MODEL VISION_MODEL 2>/dev/null | tr '\n' ' ')"
+echo "Active models: $($COMPOSE exec -T worker printenv AGENT_MODEL EXTRACT_MODEL ANALYZE_MODEL ANALYZE_RESEARCH_MODEL ANALYZE_DECIDE_MODEL VISION_MODEL 2>/dev/null | tr '\n' ' ')"

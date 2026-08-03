@@ -86,9 +86,10 @@ async def read_artifact(
     """Load the latest (or a specific version) of an artifact for this session."""
     state = state or {}
     async for svc, _ in _with_service():
+        session_id = _session_id_from_state(state)
         try:
-            row, content = await svc.read(
-                session_id=_session_id_from_state(state),
+            row, content = await svc.read_resolved(
+                session_id=session_id,
                 key_or_id=key,
                 version=version,
             )
@@ -102,6 +103,8 @@ async def read_artifact(
             "content": content,
             "metadata": row.meta,
         }
+        if row.session_id != session_id:
+            out["resolved_from_session"] = str(row.session_id)
         if truncated:
             out["truncated"] = True
         return out

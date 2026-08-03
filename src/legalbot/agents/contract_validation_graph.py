@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain.chat_models import init_chat_model
+from legalbot.agents.models import init_stage_model
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -31,8 +31,6 @@ from legalbot.agents.tools import (
     search_contract_examples,
     write_artifact,
 )
-from legalbot.agents.models import stage_model
-
 _CONTRACT_VALIDATION_TOOLS = [
     read_artifact,
     search_contract_examples,
@@ -44,7 +42,7 @@ def build_contract_validation_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the contract-validation StateGraph with input/output schemas."""
-    model = init_chat_model(stage_model("validate_contract")).bind_tools(_CONTRACT_VALIDATION_TOOLS)
+    model = init_stage_model("validate_contract").bind_tools(_CONTRACT_VALIDATION_TOOLS)
 
     def validate_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node: compare the drafted contract against retrieved example patterns."""

@@ -33,7 +33,7 @@ async def test_stage_checkpoint_namespace_applies_thread_and_namespace() -> None
 
     cfg = runnable.config
     assert cfg is not None
-    assert cfg.get("recursion_limit") == 10
+    assert cfg.get("recursion_limit") == 44  # 8 + 3 * default ANALYZE_MAX_RESEARCH_STEPS (12)
     conf = cfg["configurable"]
     assert conf["user_id"] == "user-1"
     assert conf["thread_id"] == "thread-1"

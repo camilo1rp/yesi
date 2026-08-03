@@ -135,7 +135,7 @@ def build_projection_from_artifacts(artifacts: dict[str, Any]) -> GraphProjectio
             )
         )
 
-    summary = artifacts.get("analysis/summary") or {}
+    report = artifacts.get("analysis/report") or {}
 
     for key, content in artifacts.items():
         if not key.startswith("extracted_data/") or not isinstance(content, dict):
@@ -154,24 +154,23 @@ def build_projection_from_artifacts(artifacts: dict[str, Any]) -> GraphProjectio
             )
             link_email(ent, Relation.MENTIONS, snippet=snippet)
 
-    if isinstance(summary, dict):
-        for area in summary.get("applicable_law_areas") or []:
-            area_s = str(area).strip()
-            if not area_s:
-                continue
+    if isinstance(report, dict):
+        intention = str(report.get("intention") or "").strip()
+        if intention:
             law_ent = add(
                 entity_type=EntityType.DOCUMENT,
-                canonical_name=area_s,
-                canonical_key=law_area_canonical_key(area_s),
-                attributes={"law_area": True},
-                confidence=0.95,
+                canonical_name=intention[:120],
+                canonical_key=law_area_canonical_key(intention[:80]),
+                attributes={"analysis_intention": True},
+                confidence=0.9,
             )
             link_email(law_ent, Relation.CONCERNS)
 
-        contract_req = summary.get("contract_request")
-        if isinstance(contract_req, dict):
-            type_hint = str(contract_req.get("contract_type_hint") or "contract").strip()
-            provided = contract_req.get("provided_fields") or {}
+        action = str(report.get("action") or "").strip()
+        action_payload = report.get("action_payload") or {}
+        if action == "create_contract" and isinstance(action_payload, dict):
+            type_hint = str(action_payload.get("contract_type_hint") or "contract").strip()
+            provided = action_payload.get("provided_fields") or {}
             party_names: list[str] = []
             party_entities: list[ProjectionEntity] = []
 
@@ -332,9 +331,9 @@ def build_artifact_anchor_projection(
         )
 
     extracted_raw = artifacts.get("analysis/extracted")
-    summary_raw = artifacts.get("analysis/summary")
+    report_raw = artifacts.get("analysis/report")
     extracted_doc: ProjectionEntity | None = None
-    summary_doc: ProjectionEntity | None = None
+    report_doc: ProjectionEntity | None = None
 
     if isinstance(extracted_raw, dict):
         extracted_doc = add_doc(
@@ -348,22 +347,22 @@ def build_artifact_anchor_projection(
         )
         link_email_doc(extracted_doc, role="extraction")
 
-    if isinstance(summary_raw, dict):
-        summary_doc = add_doc(
-            "analysis/summary",
-            display_name="Email analysis summary",
-            doc_kind="analysis/summary",
+    if isinstance(report_raw, dict):
+        report_doc = add_doc(
+            "analysis/report",
+            display_name="Email analysis report",
+            doc_kind="analysis/report",
             extra_attrs={
-                "intent_classification": summary_raw.get("intent_classification"),
-                "required_action": summary_raw.get("required_action"),
+                "action": report_raw.get("action"),
+                "intention": report_raw.get("intention"),
             },
         )
-        link_email_doc(summary_doc, role="summary")
+        link_email_doc(report_doc, role="report")
         if extracted_doc is not None:
             link_docs(
-                summary_doc,
+                report_doc,
                 extracted_doc,
-                attributes={"role": "derived_from", "lineage": "summary_from_extraction"},
+                attributes={"role": "derived_from", "lineage": "report_from_extraction"},
             )
 
     source_artifact_keys: set[str] = set()
@@ -405,9 +404,9 @@ def build_artifact_anchor_projection(
                 source_doc,
                 attributes={"role": "extraction_source", "source_file": source_file},
             )
-        if summary_doc is not None:
+        if report_doc is not None:
             link_docs(
-                summary_doc,
+                report_doc,
                 source_doc,
                 attributes={"role": "analysis_source", "source_file": source_file},
             )
@@ -448,7 +447,7 @@ async def llm_enrich_projection(artifacts: dict[str, Any], base: GraphProjection
 
     payload = {
         "analysis/extracted": artifacts.get("analysis/extracted"),
-        "analysis/summary": artifacts.get("analysis/summary"),
+        "analysis/report": artifacts.get("analysis/report"),
         "extracted_data": {
             k: v
             for k, v in artifacts.items()
@@ -460,9 +459,9 @@ async def llm_enrich_projection(artifacts: dict[str, Any], base: GraphProjection
         text = text[:12000] + "…"
 
     try:
-        from langchain.chat_models import init_chat_model
+        from legalbot.agents.models import init_stage_model
 
-        model = init_chat_model(settings.KG_EXTRACTION_MODEL)
+        model = init_stage_model("kg_extraction")
         structured = model.with_structured_output(LlmGraphExtraction)
         result: LlmGraphExtraction = await structured.ainvoke(
             [
@@ -530,13 +529,52 @@ def qa_acme_nda_artifact_bundle() -> dict[str, Any]:
                 },
             ],
         },
-        "analysis/summary": {
-            "intent_classification": "create_contract",
-            "urgency": "medium",
-            "risk_level": "low",
-            "applicable_law_areas": ["contract law", "confidentiality"],
-            "required_action": "create_contract",
-            "contract_request": {
+        "analysis/report": {
+            "user_input": {
+                "subject": "Please draft NDA for Acme Corp and Jane Doe",
+                "from_addr": "partner@firm.test",
+                "body_summary": (
+                    "Partner asks the firm to prepare a mutual NDA between Acme Corp "
+                    "and Jane Doe (jane@acme.com) using the same terms as the executed "
+                    "agreement in the email thread and prior_nda.docx template."
+                ),
+                "action_requested": "review_document",
+                "referenced_documents": [
+                    "executed_nda.docx (parent thread)",
+                    "prior_nda.docx (attached template)",
+                ],
+                "attachments": [
+                    {
+                        "name": "prior_nda.docx",
+                        "mime_type": (
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        ),
+                        "data_artifact_key": "extracted_data/prior_nda.docx",
+                        "text_artifact_key": "extracted_text/prior_nda.docx",
+                        "processed": True,
+                        "error": None,
+                    },
+                    {
+                        "name": "acme_logo.png",
+                        "mime_type": "image/png",
+                        "data_artifact_key": "image_analysis/acme_logo.png",
+                        "text_artifact_key": None,
+                        "processed": True,
+                        "error": None,
+                    },
+                ],
+            },
+            "intention": "Draft mutual NDA for Acme Corp and Jane Doe",
+            "research": [],
+            "relevant_resources": [
+                {
+                    "type": "artifact",
+                    "ref": "extracted_data/prior_nda.docx",
+                    "relevance": "NDA template with parties and terms",
+                }
+            ],
+            "action": "create_contract",
+            "action_payload": {
                 "contract_type_hint": "NDA",
                 "provided_fields": {
                     "disclosing_party": "Acme Corp",
@@ -549,7 +587,12 @@ def qa_acme_nda_artifact_bundle() -> dict[str, Any]:
                     "governing_law": "State of Delaware",
                     "confidentiality_term": "24 months from the Effective Date",
                 },
+                "missing_fields": [],
+                "evidence_refs": ["extracted_data/prior_nda.docx"],
             },
+            "confidence": "high",
+            "blockers": [],
+            "missing_information": [],
         },
         "extracted_data/prior_nda.docx": {
             "source_file": "prior_nda.docx",

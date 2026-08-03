@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain.chat_models import init_chat_model
+from legalbot.agents.models import init_stage_model
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -26,8 +26,6 @@ from legalbot.agents.state import (
     ReflectOutputState,
 )
 from legalbot.agents.tools import list_artifacts, read_artifact
-from legalbot.agents.models import stage_model
-
 _MEMORY_TOOLS = build_memory_tools()
 _REFLECT_TOOLS = [
     read_artifact,
@@ -42,7 +40,7 @@ def build_reflect_graph(
     store: Any | None = None,
 ) -> StateGraph:
     """Build and compile the reflect StateGraph with input/output schemas."""
-    model = init_chat_model(stage_model("reflection")).bind_tools(_REFLECT_TOOLS)
+    model = init_stage_model("reflection").bind_tools(_REFLECT_TOOLS)
 
     def reflect_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for reflection - writes episodic memory."""

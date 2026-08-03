@@ -42,10 +42,9 @@ async def analyze_image(
             },
         }
 
-    from langchain.chat_models import init_chat_model
+    from legalbot.agents.models import init_stage_model
 
-    settings = get_settings()
-    model = init_chat_model(settings.VISION_MODEL)
+    model = init_stage_model("vision")
     encoded = base64.b64encode(data).decode("utf-8")
     system = prompt or DEFAULT_VISION_PROMPT
 

@@ -301,16 +301,30 @@ class InterruptService:
         run_id: uuid.UUID | None,
         answer: dict[str, Any],
     ) -> None:
-        """Merge human answers into analysis/summary contract_request.provided_fields."""
+        """Merge human answers into analysis/report action_payload.provided_fields."""
         if not isinstance(answer, dict) or not answer:
             return
         art_svc = ArtifactService(self.db)
         try:
+            report_content: dict[str, Any] = {}
+            try:
+                _, content = await art_svc.read(session_id=session_id, key_or_id="analysis/report")
+                if isinstance(content, dict):
+                    report_content = dict(content)
+            except Exception:
+                pass
+
+            action_payload = dict(report_content.get("action_payload") or {})
+            provided_fields = dict(action_payload.get("provided_fields") or {})
+            provided_fields.update(answer)
+            action_payload["provided_fields"] = provided_fields
+            report_content["action_payload"] = action_payload
+
             await art_svc.update(
                 session_id=session_id,
-                key="analysis/summary",
-                patch_or_content={"contract_request": {"provided_fields": answer}},
-                merge="json_merge_patch",
+                key="analysis/report",
+                patch_or_content=report_content,
+                merge="replace",
                 kind="analysis",
                 run_id=run_id,
                 producer="interrupt",

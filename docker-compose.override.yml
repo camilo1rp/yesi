@@ -6,10 +6,14 @@ services:
       - blobs:/var/lib/legalbot/blobs
 
   worker:
+    command: ["worker-watch"]
     volumes:
       - ./src:/app/src
+      - ./docker:/app/docker
       - blobs:/var/lib/legalbot/blobs
 
   beat:
+    command: ["beat-watch"]
     volumes:
       - ./src:/app/src
+      - ./docker:/app/docker

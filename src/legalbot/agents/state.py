@@ -134,6 +134,14 @@ class LegalEmailState(TypedDict, total=False):
     raw_llm_reasoning: list[str]
     intermediate_tool_outputs: dict[str, Any]
     scratchpad: dict[str, Any]
+    # Analyze subgraph channels (internal; not exposed via output_schema)
+    analyze_user_input: dict[str, Any]
+    analyze_research: list[dict[str, Any]]
+    analyze_research_recorded: int
+    analyze_decision: dict[str, Any]
+    analyze_needs_hitl: bool
+    analyze_load_failed: bool
+    analyze_blockers: list[str]
     # Business outputs (exposed via respective output schemas)
     extracted_info: ExtractedInfo | None
     analysis: LegalAnalysis | None

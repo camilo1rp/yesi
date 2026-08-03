@@ -44,6 +44,20 @@ COPY README.md /app/README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev || uv sync --no-dev
 
+FROM builder AS test
+
+# Dev group includes aiosqlite (not always present in frozen lock); resolve at image build.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --all-groups
+
+COPY tests /app/tests
+
+ENV PATH=/app/.venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 ENV PATH=/app/.venv/bin:$PATH \
@@ -62,6 +76,7 @@ COPY --from=builder /app/src /app/src
 COPY --from=builder /app/alembic /app/alembic
 COPY --from=builder /app/alembic.ini /app/alembic.ini
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/watch_src.py /app/docker/watch_src.py
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /var/lib/legalbot/blobs
 

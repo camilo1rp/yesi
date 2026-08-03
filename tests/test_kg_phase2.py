@@ -89,7 +89,7 @@ async def test_build_projection_from_qa_acme_bundle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_artifact_anchor_links_summary_to_source_files() -> None:
+async def test_artifact_anchor_links_report_to_source_files() -> None:
     bundle = qa_acme_nda_artifact_bundle()
     session_id = uuid.uuid4()
     projection = build_artifact_anchor_projection(bundle, session_id)
@@ -99,13 +99,13 @@ async def test_artifact_anchor_links_summary_to_source_files() -> None:
         for e in projection.entities
         if e.entity_type == EntityType.DOCUMENT
     }
-    assert (EntityType.DOCUMENT, f"artifact:{session_id}:analysis/summary") in doc_keys
+    assert (EntityType.DOCUMENT, f"artifact:{session_id}:analysis/report") in doc_keys
     assert (EntityType.DOCUMENT, f"artifact:{session_id}:extracted_data/prior_nda.docx") in doc_keys
 
-    summary_key = f"artifact:{session_id}:analysis/summary"
+    report_key = f"artifact:{session_id}:analysis/report"
     source_key = f"artifact:{session_id}:extracted_data/prior_nda.docx"
     assert any(
-        e.src_key == summary_key and e.dst_key == source_key and e.relation == Relation.REFERENCES
+        e.src_key == report_key and e.dst_key == source_key and e.relation == Relation.REFERENCES
         for e in projection.edges
     )
 

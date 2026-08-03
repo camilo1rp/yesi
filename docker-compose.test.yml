@@ -28,7 +28,9 @@ services:
   tests:
     build:
       context: .
-    command: ["shell", "-m", "pytest", "-q"]
+      target: test
+    command: ["pytest", "-q", "--tb=short"]
+    entrypoint: []
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/legalbot_test
       DATABASE_URL_SYNC: postgresql+psycopg://postgres:postgres@postgres:5432/legalbot_test

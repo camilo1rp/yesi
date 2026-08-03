@@ -67,6 +67,9 @@ class _StageCheckpointNamespace(Runnable[dict[str, Any], dict[str, Any]]):
             if count <= 2:
                 return settings.STAGE_RECURSION_LIMIT_EXTRACT_SMALL
             return settings.STAGE_RECURSION_LIMIT_EXTRACT_LARGE
+        if self.checkpoint_ns == "analyze":
+            # load + up to N × (research + tools + record) + decide + terminal nodes
+            return 8 + 3 * settings.ANALYZE_MAX_RESEARCH_STEPS
         return settings.STAGE_RECURSION_LIMIT_DEFAULT
 
     def invoke(
