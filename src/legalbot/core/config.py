@@ -47,12 +47,27 @@ class Settings(BaseSettings):
     ARTIFACT_VERSION_CAP: int = 20
     ARTIFACT_INLINE_MAX_BYTES: int = 32 * 1024
 
-    # Models
+    # Models — tiered defaults: Haiku for IO-heavy stages, Sonnet for orchestration + contract fill
     AGENT_MODEL: str = "anthropic:claude-sonnet-4-5"
+    EXTRACT_MODEL: str = "anthropic:claude-haiku-4-5"
+    ANALYZE_MODEL: str = "anthropic:claude-haiku-4-5"
+    ACT_MODEL: str = "anthropic:claude-haiku-4-5"
+    CONTRACT_MODEL: str = "anthropic:claude-sonnet-4-5"
+    CONTRACT_VALIDATION_MODEL: str = "anthropic:claude-haiku-4-5"
+    REFLECT_MODEL: str = "anthropic:claude-haiku-4-5"
     SUMMARIZATION_MODEL: str = "anthropic:claude-haiku-4-5"
-    VISION_MODEL: str = "anthropic:claude-opus-4-6"
+    VISION_MODEL: str = "anthropic:claude-haiku-4-5"
     EMBED_MODEL: str = "openai:text-embedding-3-small"
     EMBED_DIMS: int = 1536
+
+    # Cost controls
+    REFLECTION_ENABLED: bool = True
+    READ_ARTIFACT_SUMMARY_MAX_BYTES: int = 4096
+    VISION_SKIP_MAX_BYTES: int = 8192
+    STAGE_RECURSION_LIMIT_DEFAULT: int = 25
+    STAGE_RECURSION_LIMIT_EXTRACT_NONE: int = 8
+    STAGE_RECURSION_LIMIT_EXTRACT_SMALL: int = 12
+    STAGE_RECURSION_LIMIT_EXTRACT_LARGE: int = 20
 
     # Provider credentials
     ANTHROPIC_API_KEY: SecretStr | None = None

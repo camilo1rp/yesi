@@ -23,6 +23,7 @@ from legalbot.agents.contract_graph import build_contract_graph
 from legalbot.agents.contract_validation_graph import build_contract_validation_graph
 from legalbot.agents.extract_graph import build_extract_graph
 from legalbot.agents.reflect_graph import build_reflect_graph
+from legalbot.core.config import get_settings
 from legalbot.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -54,8 +55,19 @@ class _StageCheckpointNamespace(Runnable[dict[str, Any], dict[str, Any]]):
         run_slug = str(state.get("run_id") or "").strip() or "norun"
         configurable["checkpoint_ns"] = f"{self.checkpoint_ns}:{run_slug}:{attempt_id}"
         merged["configurable"] = configurable
-        merged["recursion_limit"] = 10
+        merged["recursion_limit"] = self._recursion_limit(state)
         return cast(RunnableConfig, merged)
+
+    def _recursion_limit(self, state: dict[str, Any]) -> int:
+        settings = get_settings()
+        if self.checkpoint_ns == "extract":
+            if state.get("has_attachments") is False:
+                return settings.STAGE_RECURSION_LIMIT_EXTRACT_NONE
+            count = int(state.get("attachment_count") or 0)
+            if count <= 2:
+                return settings.STAGE_RECURSION_LIMIT_EXTRACT_SMALL
+            return settings.STAGE_RECURSION_LIMIT_EXTRACT_LARGE
+        return settings.STAGE_RECURSION_LIMIT_DEFAULT
 
     def invoke(
         self,
@@ -99,14 +111,14 @@ def build_compiled_subagents(
     store: Any | None = None,
 ) -> list[CompiledSubAgent]:
     """Build each stage graph; reuse `checkpointer` for all (see module docstring)."""
+    settings = get_settings()
     extract_graph = build_extract_graph(checkpointer=checkpointer)
     analyze_graph = build_analyze_graph(checkpointer=checkpointer)
     act_graph = build_act_graph(checkpointer=checkpointer)
     contract_graph = build_contract_graph(checkpointer=checkpointer)
     contract_validation_graph = build_contract_validation_graph(checkpointer=checkpointer)
-    reflect_graph = build_reflect_graph(checkpointer=checkpointer, store=store)
 
-    return [
+    subagents: list[CompiledSubAgent] = [
         CompiledSubAgent(
             name="extract",
             description="Pull structured facts from the email and its attachments.",
@@ -139,15 +151,20 @@ def build_compiled_subagents(
             ),
             runnable=_StageCheckpointNamespace(contract_validation_graph, "validate_contract"),
         ),
-        CompiledSubAgent(
-            name="reflection",
-            description=(
-                "Writes a post-session episode summary to long-term memory. "
-                "Call this as the FINAL action of any non-trivial task."
-            ),
-            runnable=_StageCheckpointNamespace(reflect_graph, "reflection"),
-        ),
     ]
+    if settings.REFLECTION_ENABLED:
+        reflect_graph = build_reflect_graph(checkpointer=checkpointer, store=store)
+        subagents.append(
+            CompiledSubAgent(
+                name="reflection",
+                description=(
+                    "Writes a post-session episode summary to long-term memory. "
+                    "Call this as the FINAL action of any non-trivial task."
+                ),
+                runnable=_StageCheckpointNamespace(reflect_graph, "reflection"),
+            )
+        )
+    return subagents
 
 
 # Backward compatibility alias

@@ -38,7 +38,7 @@ from legalbot.agents.tools import (
     write_artifact,
     write_draft,
 )
-from legalbot.core.config import get_settings
+from legalbot.agents.models import stage_model
 
 _ACT_TOOLS = [
     read_artifact,
@@ -54,7 +54,7 @@ def build_act_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the act StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_ACT_TOOLS)
+    model = init_chat_model(stage_model("act")).bind_tools(_ACT_TOOLS)
 
     def act_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for actions - drafts replies, schedules follow-ups, requests approvals."""

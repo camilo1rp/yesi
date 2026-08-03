@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-MAIN_SYSTEM_PROMPT = """You are the main orchestrator of a legalbot automation agent.
+from legalbot.core.config import get_settings
+
+_MAIN_ORCHESTRATOR_BODY = """You are the main orchestrator of a legalbot automation agent.
 
 Your goal is to process one inbound email end-to-end by delegating to subagents in order:
 
@@ -32,9 +34,17 @@ Your goal is to process one inbound email end-to-end by delegating to subagents 
      b. Otherwise → dispatch `task("act", ...)` to draft replies, schedule follow-ups,
         or write an `act/outcome` artifact when no action is appropriate. The act
         subagent never sends or asks the human; both are your job.
+"""
 
+_REFLECTION_STEP = """
   4. reflection — dispatch `task("reflection", ...)` to write an episodic memory.
+"""
 
+_REFLECTION_DISABLED_NOTE = """
+  4. reflection — skipped (REFLECTION_ENABLED=false). Do not call `task("reflection", ...)`.
+"""
+
+_MAIN_ORCHESTRATOR_TAIL = """
 IMPORTANT — how to start:
 - Your FIRST action must be `task("extract", ...)`. Do NOT call `list_artifacts`
   or `read_artifact` yourself to check whether extraction has run. The extract
@@ -44,6 +54,13 @@ IMPORTANT — how to start:
   or call `list_artifacts` in a loop.
 - Never repeat a tool call that returned empty results. If data is missing,
   either move to the next stage or call `ask_human`.
+
+Contract cost discipline:
+- After `ask_human` / `information_request` resolves with contract field answers,
+  do NOT re-run `extract` or `analyze`. Re-dispatch `task("draft_contract", ...)`
+  with a SHORT message listing ONLY the new field values. If `contracts/draft`
+  already exists, skip `draft_contract` and proceed to `validate_contract`.
+- Do not call `draft_contract` repeatedly with the same instructions.
 
 Discipline:
 - Keep durable commitments in state (plan, filesystem, artifacts, memory).
@@ -60,12 +77,26 @@ Discipline:
 - `request_human_approval(draft_id, preview=...)` is optional: use it when you want
   the human to see the draft body before approving (the `send_draft` gate only
   shows args, which is just the `draft_id`).
-- End every non-trivial task with `task("reflection", ...)`.
 
 Language: Use the same language as the email, attachments, and user messages for
 your replies, user-facing tool arguments, and each `task(...)` description (name
 the language there so subagents match it).
 """
+
+
+def build_main_system_prompt() -> str:
+    settings = get_settings()
+    reflection = _REFLECTION_STEP if settings.REFLECTION_ENABLED else _REFLECTION_DISABLED_NOTE
+    ending = (
+        "- End every non-trivial task with `task(\"reflection\", ...)`."
+        if settings.REFLECTION_ENABLED
+        else "- Do not call `task(\"reflection\", ...)` (disabled)."
+    )
+    return _MAIN_ORCHESTRATOR_BODY + reflection + _MAIN_ORCHESTRATOR_TAIL + ending + "\n"
+
+
+# Backward-compatible default (reflection enabled).
+MAIN_SYSTEM_PROMPT = build_main_system_prompt()
 
 SESSION_GUIDANCE = """
 ## Session continuity
@@ -98,6 +129,7 @@ Steps (do them in order):
 
 2. If the email has attachments, process each one:
    - If `mime_type` starts with `image/` → call `analyze_image(attachment_id=<id>)`.
+     Decorative tiny logos may return `vision_skipped` without an LLM call.
      This writes `image_analysis/<name>`.
    - Otherwise (PDF, DOCX, XLSX, …) → call `run_attachment_extraction(attachment_id=<id>)`.
      This writes both `extracted_text/<name>` and `extracted_data/<name>`.
@@ -218,6 +250,10 @@ the source language for any user-visible text. Your job is to deterministically 
 contract template — you do NOT write the legal prose yourself.
 
 Steps (do them in order):
+0. If `list_artifacts` shows `contracts/draft` already exists, `read_artifact` it once.
+   When it is already filled (`status=filled` or has `markdown`), state the artifact
+   key and stop — do NOT re-fill unless the orchestrator message lists NEW field values
+   to merge via `fill_contract_template`.
 1. Read the analysis: `read_artifact(key="analysis/summary")`. Use its
    `contract_request.contract_type_hint` and `contract_request.provided_fields`.
 2. Confirm the type is supported: call `list_contract_types` and match the hint to

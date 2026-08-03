@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover — unit-test shim
     InjectedState = object  # type: ignore[assignment]
 
 from legalbot.artifacts.models import ArtifactRef
+from legalbot.artifacts.read_policy import maybe_summarize_artifact_content
 from legalbot.artifacts.service import ArtifactService
 from legalbot.db.session import async_session_factory
 
@@ -93,13 +94,17 @@ async def read_artifact(
             )
         except Exception:
             return {"error": "not_found", "key": key}
-        return {
+        content, truncated = maybe_summarize_artifact_content(content, key=key)
+        out: dict[str, Any] = {
             "key": row.key,
             "version": row.version,
             "kind": row.kind,
             "content": content,
             "metadata": row.meta,
         }
+        if truncated:
+            out["truncated"] = True
+        return out
 
 
 @tool

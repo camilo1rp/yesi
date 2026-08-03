@@ -167,6 +167,13 @@ class InterruptService:
                     created_by=resolved_by or "user",
                 )
 
+        if isinstance(resolution, InterruptResolutionInfo) and resolution.answer:
+            await self._merge_contract_provided_fields(
+                session_id=session_id,
+                run_id=current.run_id,
+                answer=resolution.answer,
+            )
+
         resume_value = self._resume_value(resolution, current)
 
         await self.db.execute(
@@ -286,6 +293,38 @@ class InterruptService:
         if isinstance(resolution, InterruptResolutionInfo):
             return "skipped" if resolution.skipped else "answered"
         return resolution.decision  # type: ignore[attr-defined]
+
+    async def _merge_contract_provided_fields(
+        self,
+        *,
+        session_id: uuid.UUID,
+        run_id: uuid.UUID | None,
+        answer: dict[str, Any],
+    ) -> None:
+        """Merge human answers into analysis/summary contract_request.provided_fields."""
+        if not isinstance(answer, dict) or not answer:
+            return
+        art_svc = ArtifactService(self.db)
+        try:
+            await art_svc.update(
+                session_id=session_id,
+                key="analysis/summary",
+                patch_or_content={"contract_request": {"provided_fields": answer}},
+                merge="json_merge_patch",
+                kind="analysis",
+                run_id=run_id,
+                producer="interrupt",
+            )
+            log.info(
+                "interrupt.contract_fields_merged",
+                session_id=str(session_id),
+                fields=list(answer.keys()),
+            )
+        except Exception:
+            log.warning(
+                "interrupt.contract_fields_merge_failed",
+                session_id=str(session_id),
+            )
 
     async def _apply_artifact_edit(
         self,

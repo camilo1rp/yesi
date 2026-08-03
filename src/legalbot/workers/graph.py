@@ -58,5 +58,5 @@ async def _graph_index_run(run_id: str) -> dict:
         svc = KnowledgeGraphService(db)
         result = await svc.index_run(run_uuid)
         await db.commit()
-        log.info("graph.index_run", run_id=run_id, **result)
+        log.info("graph.index_run", **result)
         return result

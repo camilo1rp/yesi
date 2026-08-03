@@ -26,7 +26,7 @@ from legalbot.agents.state import (
     ReflectOutputState,
 )
 from legalbot.agents.tools import list_artifacts, read_artifact
-from legalbot.core.config import get_settings
+from legalbot.agents.models import stage_model
 
 _MEMORY_TOOLS = build_memory_tools()
 _REFLECT_TOOLS = [
@@ -42,7 +42,7 @@ def build_reflect_graph(
     store: Any | None = None,
 ) -> StateGraph:
     """Build and compile the reflect StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_REFLECT_TOOLS)
+    model = init_chat_model(stage_model("reflection")).bind_tools(_REFLECT_TOOLS)
 
     def reflect_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for reflection - writes episodic memory."""

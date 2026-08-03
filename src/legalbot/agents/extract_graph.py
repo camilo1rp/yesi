@@ -31,7 +31,7 @@ from legalbot.agents.tools import (
     run_attachment_extraction,
     write_artifact,
 )
-from legalbot.core.config import get_settings
+from legalbot.agents.models import stage_model
 
 _EXTRACT_TOOLS = [
     fetch_email,
@@ -46,7 +46,7 @@ def build_extract_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the extract StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_EXTRACT_TOOLS)
+    model = init_chat_model(stage_model("extract")).bind_tools(_EXTRACT_TOOLS)
 
     def extract_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for extraction - calls tools to extract facts."""

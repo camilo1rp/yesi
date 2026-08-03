@@ -33,6 +33,63 @@ def _session_id(state: dict[str, Any]) -> uuid.UUID:
     return uuid.UUID(sid)
 
 
+async def _resolve_attachment(
+    db: Any, state: dict[str, Any], attachment_ref: str
+) -> Any | None:
+    """Resolve attachment by UUID or filename on the session's ingestion item."""
+    from sqlalchemy import select
+
+    from legalbot.db.models import (
+        EmailMetadata,
+        IngestionAttachment,
+        IngestionItem,
+        ProcessingJob,
+    )
+    from legalbot.db.models import Session as SessionRow
+
+    try:
+        att_id = uuid.UUID(attachment_ref)
+        att = (
+            await db.execute(
+                select(IngestionAttachment).where(IngestionAttachment.id == att_id)
+            )
+        ).scalar_one_or_none()
+        if att is not None:
+            return att
+    except ValueError:
+        pass
+
+    item = (
+        await db.execute(
+            select(IngestionItem)
+            .join(EmailMetadata, EmailMetadata.ingestion_item_id == IngestionItem.id)
+            .join(ProcessingJob, ProcessingJob.ingestion_item_id == IngestionItem.id)
+            .join(SessionRow, SessionRow.job_id == ProcessingJob.id)
+            .where(SessionRow.id == _session_id(state))
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        return None
+
+    attachments = (
+        (
+            await db.execute(
+                select(IngestionAttachment).where(
+                    IngestionAttachment.ingestion_item_id == item.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ref_lower = attachment_ref.lower()
+    for att in attachments:
+        name = (att.name or "").lower()
+        if name == ref_lower or ref_lower in name:
+            return att
+    return None
+
+
 @tool
 async def fetch_email(
     state: Annotated[dict, InjectedState] = None,  # type: ignore[assignment]
@@ -121,12 +178,11 @@ async def run_attachment_extraction(
     from legalbot.attachments.dispatcher import extract
     from legalbot.db.models import IngestionAttachment
 
-    att_id = uuid.UUID(attachment_id)
     sm = async_session_factory()
     async with sm() as db:
-        att = (
-            await db.execute(select(IngestionAttachment).where(IngestionAttachment.id == att_id))
-        ).scalar_one()
+        att = await _resolve_attachment(db, state, attachment_id)
+        if att is None:
+            return {"error": f"attachment not found: {attachment_id}"}
 
         filename = att.name or "attachment"
 
@@ -138,24 +194,23 @@ async def run_attachment_extraction(
             data = b""
 
         result = await extract(
-            data=data,
-            mime_type=att.mime_type or "application/octet-stream",
-            filename=filename,
+            data,
+            mime=att.mime_type or "application/octet-stream",
+            name=filename,
         )
 
-        plain_text: str = result.get("text", "") if isinstance(result, dict) else str(result)
-        structured: dict = (
-            {
-                "source_file": filename,
-                "summary": result.get("summary", plain_text[:200]),
-                "entities": result.get("entities", []),
-                "key_findings": result.get("key_findings", []),
-                "pages": result.get("pages"),
-                "rows": result.get("rows"),
-            }
-            if isinstance(result, dict)
-            else {"source_file": filename, "summary": str(result)[:200]}
-        )
+        plain_text = result.text if result.ok else ""
+        data_fields = result.data if result.ok else {}
+        structured: dict = {
+            "source_file": filename,
+            "summary": data_fields.get("summary", plain_text[:200] if plain_text else result.error or ""),
+            "entities": data_fields.get("entities", []),
+            "key_findings": data_fields.get("key_findings", []),
+            "pages": data_fields.get("pages"),
+            "rows": data_fields.get("rows"),
+        }
+        if not result.ok:
+            structured["error"] = result.error
 
         art_svc = ArtifactService(db)
         run_id = uuid.UUID(state["run_id"]) if state.get("run_id") else None
@@ -212,20 +267,33 @@ async def analyze_image(
     from legalbot.attachments.vision import analyze_image as vision_analyze
     from legalbot.db.models import IngestionAttachment
 
-    att_id = uuid.UUID(attachment_id)
     sm = async_session_factory()
     async with sm() as db:
-        att = (
-            await db.execute(select(IngestionAttachment).where(IngestionAttachment.id == att_id))
-        ).scalar_one()
+        att = await _resolve_attachment(db, state, attachment_id)
+        if att is None:
+            return {"error": f"attachment not found: {attachment_id}"}
 
         filename = att.name or "image"
         data = await get_blob_store().get(att.raw_uri) if att.raw_uri else b""
-        findings = await vision_analyze(data, mime_type=att.mime_type or "image/png")
+        findings = await vision_analyze(
+            data,
+            mime=att.mime_type or "image/png",
+            name=filename,
+        )
 
-        # Normalise vision output into the same envelope shape as extracted_data
+        # Normalise vision envelope {method, text, data} into extracted_data shape
+        if isinstance(findings, dict) and isinstance(findings.get("data"), dict):
+            inner = findings["data"]
+            if "summary" in inner or "entities" in inner or "raw" in inner:
+                findings = dict(inner)
         if not isinstance(findings, dict):
             findings = {"summary": str(findings), "entities": [], "key_findings": []}
+        if "summary" not in findings and "raw" in findings:
+            findings = {
+                "summary": str(findings.get("raw", "")),
+                "entities": findings.get("entities", []),
+                "key_findings": findings.get("key_findings", []),
+            }
         findings.setdefault("source_file", filename)
 
         art_svc = ArtifactService(db)

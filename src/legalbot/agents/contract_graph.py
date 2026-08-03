@@ -19,6 +19,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from legalbot.agents.models import stage_model
 from legalbot.agents.prompts import CONTRACT_PROMPT
 from legalbot.agents.stage_messages import prepare_stage_messages
 from legalbot.agents.stage_result import build_stage_result
@@ -34,7 +35,6 @@ from legalbot.agents.tools import (
     list_contract_types,
     read_artifact,
 )
-from legalbot.core.config import get_settings
 
 _CONTRACT_TOOLS = [
     list_contract_types,
@@ -49,7 +49,7 @@ def build_contract_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the contract-drafting StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_CONTRACT_TOOLS)
+    model = init_chat_model(stage_model("draft_contract")).bind_tools(_CONTRACT_TOOLS)
 
     def contract_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node: validate type, gather fields, fill the template deterministically."""

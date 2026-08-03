@@ -31,7 +31,7 @@ from legalbot.agents.tools import (
     search_contract_examples,
     write_artifact,
 )
-from legalbot.core.config import get_settings
+from legalbot.agents.models import stage_model
 
 _CONTRACT_VALIDATION_TOOLS = [
     read_artifact,
@@ -44,7 +44,7 @@ def build_contract_validation_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the contract-validation StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_CONTRACT_VALIDATION_TOOLS)
+    model = init_chat_model(stage_model("validate_contract")).bind_tools(_CONTRACT_VALIDATION_TOOLS)
 
     def validate_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node: compare the drafted contract against retrieved example patterns."""

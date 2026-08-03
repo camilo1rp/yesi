@@ -100,10 +100,10 @@ async def test_artifact_anchor_links_summary_to_source_files() -> None:
         if e.entity_type == EntityType.DOCUMENT
     }
     assert (EntityType.DOCUMENT, f"artifact:{session_id}:analysis/summary") in doc_keys
-    assert (EntityType.DOCUMENT, f"artifact:{session_id}:extracted_data/prior_nda.pdf") in doc_keys
+    assert (EntityType.DOCUMENT, f"artifact:{session_id}:extracted_data/prior_nda.docx") in doc_keys
 
     summary_key = f"artifact:{session_id}:analysis/summary"
-    source_key = f"artifact:{session_id}:extracted_data/prior_nda.pdf"
+    source_key = f"artifact:{session_id}:extracted_data/prior_nda.docx"
     assert any(
         e.src_key == summary_key and e.dst_key == source_key and e.relation == Relation.REFERENCES
         for e in projection.edges

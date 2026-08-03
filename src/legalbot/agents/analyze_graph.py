@@ -28,7 +28,7 @@ from legalbot.agents.tools import (
     update_artifact,
     write_artifact,
 )
-from legalbot.core.config import get_settings
+from legalbot.agents.models import stage_model
 
 _ANALYZE_TOOLS = [read_artifact, list_artifacts, write_artifact, update_artifact]
 
@@ -37,7 +37,7 @@ def build_analyze_graph(
     checkpointer: AsyncPostgresSaver | None = None,
 ) -> StateGraph:
     """Build and compile the analyze StateGraph with input/output schemas."""
-    model = init_chat_model(get_settings().AGENT_MODEL).bind_tools(_ANALYZE_TOOLS)
+    model = init_chat_model(stage_model("analyze")).bind_tools(_ANALYZE_TOOLS)
 
     def analyze_node(state: LegalEmailState) -> dict[str, Any]:
         """LLM node for analysis - classifies intent and produces analysis."""

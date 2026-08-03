@@ -11,9 +11,9 @@ from typing import Any, cast
 
 from legalbot.agents.memory import MemoryMiddleware, build_memory_tools
 from legalbot.agents.prompts import (
-    MAIN_SYSTEM_PROMPT,
     MEMORY_GUIDANCE,
     SESSION_GUIDANCE,
+    build_main_system_prompt,
 )
 from legalbot.agents.state import AgentState
 from legalbot.agents.subagents import build_compiled_subagents
@@ -136,7 +136,7 @@ async def build_agent() -> tuple[Any, Any]:
     agent = create_agent(
         model=main_model,
         tools=native_tools,
-        system_prompt=MAIN_SYSTEM_PROMPT + SESSION_GUIDANCE + MEMORY_GUIDANCE,
+        system_prompt=build_main_system_prompt() + SESSION_GUIDANCE + MEMORY_GUIDANCE,
         middleware=middleware,
         state_schema=cast(Any, AgentState),
         checkpointer=checkpointer,

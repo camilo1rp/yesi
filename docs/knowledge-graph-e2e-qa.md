@@ -14,14 +14,14 @@ Related docs:
 
 ## Scope
 
-| In scope (Phase 1 QA) | Out of scope (later phases) |
-|------------------------|-----------------------------|
-| `graph_index_item` after ingest | LLM entity projection (`graph_index_run`) |
-| Deterministic edges: `SENT_BY`, `SENT_TO`, `ATTACHED_TO`, `REPLIES_TO` | `PARTY_TO`, `SUPERSEDES`, temporal `valid_to` |
-| `search_related_docs` via agent (main graph) | `get_entity_context`, graph middleware |
-| Tenant isolation (`owner_user_id`) | Entity merge janitor |
-| Idempotent re-ingest / re-index | pgvector embedding search on entities |
-| Full pipeline smoke (extract → analyze → act) | Contract subgraph graph wiring (Phase 4) |
+| In scope | Out of scope (later phases) |
+|----------|-----------------------------|
+| Phase 1: `graph_index_item`, deterministic edges | `SUPERSEDES`, temporal `valid_to` janitor |
+| Phase 2: `graph_index_run`, org/contract projection, artifact anchors | `get_entity_context`, graph middleware (Phase 4) |
+| `search_related_docs` + SQL search verification | pgvector HNSW entity search |
+| Full pipeline + HITL (review_draft, tool_approval) | OKF export |
+| Thread `REPLIES_TO`, attachments `ATTACHED_TO`, `extracted_data/*` | Entity merge janitor (Phase 3) |
+| Tenant isolation (`owner_user_id`) | Contract subgraph auto-wiring (Phase 4) |
 
 ---
 
@@ -94,6 +94,7 @@ psql_q() {
 | E2E-02 | Full pipeline (attachments) | `extracted_*` artifacts + graph for sender |
 | E2E-03 | Contract intent email | `create_contract` path + artifacts (LLM-dependent) |
 | E2E-04 | Agent uses graph (observability) | LangSmith/logs: `search_related_docs` on contract-like mail |
+| **E2E-FULL** | **Full KG + pipeline capabilities** | **Automated: `scripts/qa/kg_full_capabilities.sh`** |
 
 ---
 
@@ -494,7 +495,111 @@ dev deps or mount `tests/` and install pytest in the test job (see `docker-compo
 
 ---
 
-## Future QA (Phase 3+)
+## Scenario E2E-FULL — Full knowledge graph capabilities (automated)
+
+**Goal:** One scripted run that exercises **Phase 1 + Phase 2** together with the
+real pipeline (extract → analyze → act → reflection), attachments, email thread,
+HITL interrupts, and post-completion `graph_index_run`.
+
+### What it covers
+
+| Layer | Capability verified |
+|-------|---------------------|
+| Ingest | `graph.index_item` → Email, Person, Attachment, `SENT_BY`, `ATTACHED_TO` |
+| Thread | Parent + child emails → `REPLIES_TO` |
+| Pipeline | `analysis/extracted`, `analysis/summary`, `extracted_data/*`, `drafts/reply` |
+| HITL | Auto-resolves `review_draft`, `tool_approval`, and `information_request` until job `completed` |
+| Phase 2 | `graph.index_run` → Organization, Person, Contract, `PARTY_TO`, `CONCERNS` |
+| Anchors | `Document` nodes for `analysis/summary` → `extracted_data/*` |
+| Search | SQL: Acme org + mention on child `ingestion_item` |
+| Tool routing | Child has DOCX → `run_attachment_extraction` + PNG → `analyze_image` |
+
+### Fixture data (agent reasoning)
+
+Narrative lives in `scripts/qa/fixture_content.py` (shared with unit tests via
+`qa_acme_nda_artifact_bundle()`). Generated files under `scripts/qa/fixtures/`:
+
+| Asset | Purpose for the agent |
+|-------|------------------------|
+| **Parent email** | Subject/body name Acme Corp, Jane Doe, `jane@acme.com`, effective date, purpose, 24‑month term, Delaware law — indexed into KG on ingest (`body_preview` + subject entity) |
+| **executed_nda.docx** | Parent attachment: executed mutual NDA with the same fields as the template |
+| **Child email** | Explicit `create_contract` intent; references parent thread + both attachments; warns **mutual** not unilateral |
+| **prior_nda.docx** | Template with parties, effective date, purpose, term, governing law — drives `extracted_data/*` |
+| **acme_logo.png** | Optional fixture; vision skipped when name matches logo/icon and size ≤ `VISION_SKIP_MAX_BYTES` |
+| **CC `jane@acme.com`** | Extra Person node in KG for `search_related_docs("jane")` |
+
+After child pipeline **completes**, `graph_index_run` projects Organization/Person/Contract
+from `analysis/summary` + `extracted_data/*` so `search_related_docs("Acme")` returns
+the child ingestion item with party context.
+
+**Note:** Parent job is ingest-only (no full pipeline) to save LLM cost; thread context
+for the child comes from email bodies + `REPLIES_TO` + child’s own extraction artifacts.
+
+### Prerequisites
+
+Same as § Prerequisites (`KG_ENABLED=true`, LLM keys, `CELERY_CONCURRENCY=1`, mailbox
+`qa-inbox` / owner `qa-user`). Stack must be up and healthy.
+
+### Run (from repo root)
+
+```bash
+# Optional: pre-generate DOCX fixtures locally (requires python-docx)
+python3 scripts/qa/generate_kg_fixtures.py
+
+# Full QA (~3–8 minutes depending on LLM latency)
+# Fixtures are auto-generated via the api container if missing.
+chmod +x scripts/qa/kg_full_capabilities.sh
+./scripts/qa/kg_full_capabilities.sh
+```
+
+Optional env overrides:
+
+```bash
+LEGALBOT_API=http://localhost:8000
+KG_QA_MAILBOX=qa-inbox
+KG_QA_OWNER=qa-user
+```
+
+### Pass criteria
+
+Script exits `0` and reports PASS for:
+
+- API health + fixtures
+- Parent ingest + `graph.index_item` (thread seed; full job completion not required)
+- Child job `completed` (full pipeline + `graph.index_run`)
+- Child artifacts: `analysis/extracted`, `analysis/summary`, `extracted_data/*`, `image_analysis/*`
+- SQL: ≥1 `Organization`, ≥1 `Contract`, ≥2 `PARTY_TO`, ≥1 `REPLIES_TO`
+- ≥1 analysis `Document` anchor
+- Acme-related mention on child ingestion item
+- Worker logs contain `graph.index_item` and `graph.index_run`
+
+### Manual follow-up (optional)
+
+```bash
+# Child session artifacts
+curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts" | jq '[.[].key]'
+
+# Read analysis summary JSON
+curl -s "http://localhost:8000/api/sessions/<session_id>/artifacts/analysis/summary" | jq
+```
+
+Inspect `intent_classification` — often `create_contract` on the child message
+(LLM-dependent).
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `fixtures missing` | Run `python3 scripts/qa/generate_kg_fixtures.py` (needs `python-docx` in host env) |
+| Job `failed` | Fresh `provider_message_id` each run (script uses timestamp); check worker logs |
+| No `graph.index_run` | Job must reach `completed`; rebuild worker after merge |
+| No `Organization` | Pipeline must finish analyze; check `analysis/summary` exists |
+| Timeout | Increase loop in script or check API keys / model errors in worker |
+| Stuck `awaiting_human` | Script auto-resolves `information_request`, `review_draft`, and `tool_approval`; check interrupt kind in DB |
+| Anthropic credit error | Add credits, switch stage models to OpenAI in `.env`, or set `REFLECTION_ENABLED=false` for QA |
+| High API call volume | Run `./scripts/qa/estimate_run_cost.sh`; tier models via `EXTRACT_MODEL` / `ANALYZE_MODEL` (see `.env.example`) |
+
+---
 
 When implementing later phases, extend this doc with:
 

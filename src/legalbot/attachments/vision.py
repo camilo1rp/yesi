@@ -24,8 +24,24 @@ If a field does not apply, use an empty string or list. Do not include commentar
 
 
 async def analyze_image(
-    data: bytes, *, mime: str = "image/png", prompt: str | None = None
+    data: bytes, *, mime: str = "image/png", name: str | None = None, prompt: str | None = None
 ) -> dict[str, Any]:
+    from legalbot.attachments.vision_policy import should_skip_vision_analysis
+
+    skip_reason = should_skip_vision_analysis(data, name=name, mime=mime)
+    if skip_reason:
+        label = name or "image"
+        return {
+            "method": "vision_skipped",
+            "text": f"Skipped vision analysis ({skip_reason}) for {label}.",
+            "data": {
+                "summary": f"Decorative or tiny image ({label}); no contract text expected.",
+                "entities": [],
+                "key_findings": ["vision_skipped", skip_reason],
+                "source_file": label,
+            },
+        }
+
     from langchain.chat_models import init_chat_model
 
     settings = get_settings()

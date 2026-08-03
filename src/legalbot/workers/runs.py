@@ -63,6 +63,7 @@ async def _run_pipeline(job_id: str) -> dict[str, Any]:
         # Determine upfront whether the email has attachments so subagents
         # can branch without a redundant DB round-trip.
         has_attachments = await _ingestion_item_has_attachments(db, job.ingestion_item_id)
+        attachment_count = await _ingestion_item_attachment_count(db, job.ingestion_item_id)
 
         run_svc = RunService(db)
         run = await run_svc.start(
@@ -80,6 +81,7 @@ async def _run_pipeline(job_id: str) -> dict[str, Any]:
             session_id=session.id,
             resume_payload=None,
             has_attachments=has_attachments,
+            attachment_count=attachment_count,
         )
     finally:
         await _release_concurrency_budget(job.id)
@@ -126,7 +128,14 @@ async def _resume_run(run_id: str, resume_payload: Any) -> dict[str, Any]:
             await db.execute(select(SessionRow).where(SessionRow.id == run.session_id))
         ).scalar_one()
         has_attachments = await _run_has_attachments(db, run)
+        attachment_count: int | None = None
         if run.kind == RunKind.pipeline:
+            job = (
+                await db.execute(select(ProcessingJob).where(ProcessingJob.id == run.job_id))
+            ).scalar_one()
+            attachment_count = await _ingestion_item_attachment_count(
+                db, job.ingestion_item_id
+            )
             job_svc = JobService(db)
             try:
                 await job_svc.transition(
@@ -148,6 +157,7 @@ async def _resume_run(run_id: str, resume_payload: Any) -> dict[str, Any]:
         session_id=session.id,
         resume_payload=resume_payload,
         has_attachments=has_attachments,
+        attachment_count=attachment_count,
     )
     return {"ok": graph_ok, "run_id": run_id}
 
@@ -160,14 +170,20 @@ async def _run_has_attachments(db: AsyncSession, run: Run) -> bool:
 
 
 async def _ingestion_item_has_attachments(db: AsyncSession, ingestion_item_id: uuid.UUID) -> bool:
-    return (
-        await db.execute(
-            select(IngestionAttachment.id)
-            .join(IngestionItem, IngestionAttachment.ingestion_item_id == IngestionItem.id)
-            .where(IngestionItem.id == ingestion_item_id)
-            .limit(1)
-        )
-    ).first() is not None
+    return await _ingestion_item_attachment_count(db, ingestion_item_id) > 0
+
+
+async def _ingestion_item_attachment_count(
+    db: AsyncSession, ingestion_item_id: uuid.UUID
+) -> int:
+    from sqlalchemy import func
+
+    result = await db.execute(
+        select(func.count())
+        .select_from(IngestionAttachment)
+        .where(IngestionAttachment.ingestion_item_id == ingestion_item_id)
+    )
+    return int(result.scalar_one())
 
 
 async def _fail_pipeline_job_for_graph_error(
@@ -205,6 +221,7 @@ async def _invoke_graph(
     session_id: uuid.UUID,
     resume_payload: Any,
     has_attachments: bool | None = None,
+    attachment_count: int | None = None,
 ) -> bool:
     """Invoke the compiled LangGraph agent with this session's thread and state.
 
@@ -274,6 +291,8 @@ async def _invoke_graph(
                 initial_state["email_id"] = str(job.ingestion_item_id)
             if has_attachments is not None:
                 initial_state["has_attachments"] = has_attachments
+            if attachment_count is not None:
+                initial_state["attachment_count"] = attachment_count
             output_state = await graph.ainvoke(initial_state, config=config)
         # Write projected output to session tables (replaces SessionProjectionMiddleware)
         await _write_session_projection(session_id, run_id, output_state)

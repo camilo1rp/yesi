@@ -503,19 +503,31 @@ def qa_acme_nda_artifact_bundle() -> dict[str, Any]:
             "from_addr": "partner@firm.test",
             "body_summary": (
                 "Partner asks the firm to prepare a mutual NDA between Acme Corp "
-                "and Jane Doe using prior terms if possible."
+                "and Jane Doe (jane@acme.com) using the same terms as the executed "
+                "agreement in the email thread and prior_nda.docx template."
             ),
             "action_requested": "review_document",
-            "referenced_documents": ["prior NDA terms"],
+            "referenced_documents": [
+                "executed_nda.docx (parent thread)",
+                "prior_nda.docx (attached template)",
+            ],
             "attachments": [
                 {
-                    "name": "prior_nda.pdf",
-                    "mime_type": "application/pdf",
-                    "data_artifact_key": "extracted_data/prior_nda.pdf",
-                    "text_artifact_key": "extracted_text/prior_nda.pdf",
+                    "name": "prior_nda.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "data_artifact_key": "extracted_data/prior_nda.docx",
+                    "text_artifact_key": "extracted_text/prior_nda.docx",
                     "processed": True,
                     "error": None,
-                }
+                },
+                {
+                    "name": "acme_logo.png",
+                    "mime_type": "image/png",
+                    "data_artifact_key": "image_analysis/acme_logo.png",
+                    "text_artifact_key": None,
+                    "processed": True,
+                    "error": None,
+                },
             ],
         },
         "analysis/summary": {
@@ -529,16 +541,38 @@ def qa_acme_nda_artifact_bundle() -> dict[str, Any]:
                 "provided_fields": {
                     "disclosing_party": "Acme Corp",
                     "receiving_party": "Jane Doe",
+                    "effective_date": "January 1, 2026",
+                    "purpose": (
+                        "Evaluating a potential business partnership and joint "
+                        "product discussions between Acme Corp and Jane Doe"
+                    ),
+                    "governing_law": "State of Delaware",
+                    "confidentiality_term": "24 months from the Effective Date",
                 },
             },
         },
-        "extracted_data/prior_nda.pdf": {
-            "source_file": "prior_nda.pdf",
-            "summary": "Prior mutual NDA between Acme Corp and Jane Doe.",
+        "extracted_data/prior_nda.docx": {
+            "source_file": "prior_nda.docx",
+            "summary": (
+                "Mutual NDA template between Acme Corp and Jane Doe with 24-month "
+                "confidentiality term and Delaware governing law."
+            ),
             "entities": [
                 {"name": "Acme Corp", "type": "Organization"},
-                {"name": "Jane Doe", "type": "Person"},
+                {"name": "Jane Doe", "type": "Person", "email": "jane@acme.com"},
             ],
-            "key_findings": ["24-month confidentiality term"],
+            "key_findings": [
+                "Effective date: January 1, 2026",
+                "Purpose: business partnership and joint product discussions",
+                "Confidentiality term: 24 months from the Effective Date",
+                "Governing law: State of Delaware",
+                "Contract type: mutual NDA (not unilateral)",
+            ],
+        },
+        "image_analysis/acme_logo.png": {
+            "source_file": "acme_logo.png",
+            "summary": "Acme Corp corporate logo (decorative; no contract terms).",
+            "entities": [{"name": "Acme Corp", "type": "Organization"}],
+            "key_findings": ["Image is a logo only — not a legal document"],
         },
     }

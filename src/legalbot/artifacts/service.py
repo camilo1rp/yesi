@@ -148,25 +148,31 @@ class ArtifactService:
 
         prior_latest_id = await self._demote_current_latest(session_id, key)
 
-        row = Artifact(
-            id=uuid.uuid4() if storage == "inline" else uuid.UUID(blob_ref.rsplit("/", 1)[-1]),
-            session_id=session_id,
-            run_id=run_id,
-            producer=producer,
-            kind=kind,
-            key=key,
-            version=version,
-            mime=mime,
-            storage=storage,
-            content_inline=content_inline,
-            blob_ref=blob_ref,
-            checksum=self._checksum(payload_bytes),
-            size_bytes=size_bytes,
-            meta=metadata or {},
-            supersedes_artifact_id=prior_latest_id,
-            is_latest=True,
-            created_by=created_by,
-        )
+        artifact_id = uuid.uuid4() if storage == "inline" else uuid.UUID(blob_ref.rsplit("/", 1)[-1])
+        row_kwargs: dict[str, Any] = {
+            "id": artifact_id,
+            "session_id": session_id,
+            "run_id": run_id,
+            "producer": producer,
+            "kind": kind,
+            "key": key,
+            "version": version,
+            "mime": mime,
+            "storage": storage,
+            "checksum": self._checksum(payload_bytes),
+            "size_bytes": size_bytes,
+            "meta": metadata or {},
+            "supersedes_artifact_id": prior_latest_id,
+            "is_latest": True,
+            "created_by": created_by,
+        }
+        if storage == "inline":
+            row_kwargs["content_inline"] = content_inline
+            row_kwargs["blob_ref"] = None
+        else:
+            row_kwargs["blob_ref"] = blob_ref
+
+        row = Artifact(**row_kwargs)
         self.db.add(row)
         await self.db.flush()
 
