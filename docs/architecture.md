@@ -29,7 +29,8 @@ poll_mailboxes  ──►  poll_mailbox (per active Mailbox)
   │              ├── IngestionItem (ON CONFLICT idempotent)
   │              ├── EmailMetadata
   │              ├── IngestionAttachment
-  │              └── ProcessingJob (intake → ready)
+  │              ├── ProcessingJob (intake → ready)
+  │              └── graph_index_item (if KG_ENABLED)
   │
   ▼
 dispatch_ready_jobs (beat, every DISPATCH_INTERVAL_SEC)
@@ -46,12 +47,16 @@ run_pipeline (Celery task)
     │  Main agent (deepagents create_agent)      │
     │  Middleware stack (see below)              │
     │  SubAgentMiddleware routes to stages:     │
-    │    • extract / analyze / act / reflection  │
+    │    • extract / analyze / act             │
+    │    • draft_contract / validate_contract  │
+    │    • reflection (optional)               │
     │      (checkpoint_ns = {stage}:{run_id}:{attempt_uuid} per task call)   │
     └────────────────────────────────────────────┘
        │
        ▼
   completed / awaiting_human / failed
+       │
+       ├── graph_index_run (if KG_ENABLED, on successful pipeline completion)
        │
   ┌────┴────┬──────────────┬────────────────┐
   ▼         ▼              ▼                ▼
@@ -66,21 +71,23 @@ POST      POST           POST            POST
 src/legalbot/
 ├── api/            FastAPI app + routers (mailboxes, ingestion, jobs, sessions,
 │                 interrupts, artifacts, runs, scheduled-jobs, admin)
-├── agents/         Main graph factory, state schema, 4 stage subgraphs,
+├── agents/         Main graph factory, state schema, stage subgraphs
+│                 (extract / analyze / act / contract / reflection),
 │                 middleware, memory tools, prompts, stage_result builder
-├── artifacts/      ArtifactService, BlobStore, ArtifactRef value objects
-├── attachments/    Attachment extraction helpers
+├── artifacts/      ArtifactService, BlobStore, key normalization, ArtifactRef
+├── attachments/    Attachment extraction helpers + vision policy
 ├── core/           Settings (Pydantic), lifespan, logging, metrics, OTel
 ├── db/             SQLAlchemy base, all ORM models, session factory
 ├── ingestion/      IngestionItemService, source mappers (email)
 ├── interrupts/     InterruptService, resolution schemas, ask_human tools
 ├── jobs/           JobService, JobTimelineService, dispatcher, sweeper
-├── memory/         (reserved for future expansion)
+├── memory/         Knowledge graph (entities, mentions, edges) + extraction
 ├── providers/      Mailbox adapters (Gmail, MS Graph, fake dev provider)
 ├── scheduling/     SchedulingService + redbeat reconciler
 ├── schemas/        (reserved)
 ├── services/       SessionService, ReplayService, RunService
-└── workers/        Celery app, ingest tasks, run tasks, janitors, scheduled tasks
+└── workers/        Celery app, ingest tasks, run tasks, graph indexing,
+                    janitors, scheduled tasks
 ```
 
 ## Durable State Model
@@ -94,6 +101,7 @@ src/legalbot/
 | Graph execution | `run`, `run_step` + LangGraph `checkpoint` / `checkpoint_blobs` (Postgres) |
 | Agent outputs | `artifact` (versioned, inline or blob), `draft` (projection) |
 | Long-term memory | LangGraph `store` table (pgvector index on `content`, `task`, `approach`) |
+| Knowledge graph | `kg_entity`, `kg_alias`, `kg_mention`, `kg_edge` (Phase 1 ingest + Phase 2 run projection) |
 | Human-in-the-loop | `interrupt_request`, `user_intervention` |
 | Scheduling | `scheduled_job` + redbeat Redis entries |
 
@@ -122,20 +130,15 @@ All DB access goes through services (`JobService`, `SessionService`, `ArtifactSe
 
 4. Caches the compiled graph per-process; rebuilds only if the `psycopg` pool changes.
 
-### Native Tools
+### Native Tools (orchestrator)
+
+The main agent delegates extraction, analysis, drafting, and contract work to subagents. Orchestrator-native tools are routing, artifacts, memory, and HITL — not attachment parsing.
 
 | Tool | Purpose |
 |------|---------|
-| `fetch_email` | Load ingestion item + metadata into state |
-| `run_attachment_extraction` | OCR / parse PDF, DOCX, XLSX |
-| `analyze_image` | Vision-model description of image attachments |
-| `write_draft` | Compose a reply draft |
-| `send_draft` | Mark draft as sent |
-| `schedule_followup` | Create a `scheduled_job` row |
-| `read_artifact` | Load an artifact by key |
-| `write_artifact` | Create a new artifact version |
-| `update_artifact` | Update artifact with merge semantics |
+| `read_artifact` | Load an artifact by key (filename normalization + same-email-thread session fallback) |
 | `list_artifacts` | List artifact keys for a session |
+| `send_draft` | Mark a reply `draft` row as sent (UUID `draft_id`, not artifact keys) |
 | `ask_human` | Open an information-request interrupt |
 | `request_human_approval` | Open a tool-approval / review interrupt |
 | `user_manage` | Write user-specific facts to memory store |
@@ -143,22 +146,51 @@ All DB access goes through services (`JobService`, `SessionService`, `ArtifactSe
 | `episode_search` | Search past agent episodes |
 | `procedure_search` | Search stored procedures |
 
+Stage subgraphs bind their own tools (e.g. `fetch_email`, `run_attachment_extraction`, `analyze_image` on extract; `search_related_docs` on analyze research; `write_draft` on act).
+
+### Pipeline Stages (orchestrator routing)
+
+After ingestion, `run_pipeline` injects a synthetic kickoff `HumanMessage` and the orchestrator runs:
+
+```
+extract → analyze → branch on analysis/report.action
+  ├─ create_contract → draft_contract → validate_contract → HITL (default)
+  ├─ draft_response → act → (send_draft after approval)
+  ├─ other → act/outcome (unsupported; orchestrator skips act/contract)
+  └─ needs_human → ask_human (from report.missing_information)
+optional: reflection (REFLECTION_ENABLED)
+```
+
+Legacy `analysis/summary` is replaced by `analysis/report` with structured `action`, `action_payload`, and `research` steps.
+
 ### Stage Subgraphs
 
 Each stage is an independent `StateGraph` compiled with the **same** `AsyncPostgresSaver`. Isolation is achieved via `_StageCheckpointNamespace`, which injects `checkpoint_ns = "{stage}:{run_id}:{attempt_uuid}"` on **each** `task(...)` invoke (`attempt_uuid` is new per outer subagent call so retries do not merge with a broken prior tail; internal tool loops reuse that ns). Persist the same string on `run_step.checkpoint_ns` when recording steps for replay audit.
 
-| Stage | `checkpoint_ns` prefix | Primary Artifact Key | Next Stage |
-|-------|------------------------|---------------------|------------|
-| `extract` | `extract:` | `analysis/extracted` | `analyze` |
-| `analyze` | `analyze:` | `analysis/report` | `act` or `draft_contract` |
-| `act` | `act:` | `act/outcome` or `drafts/reply` | `reflection` |
-| `reflection` | `reflection:` | (none, writes to memory store) | `null` |
+| Stage | `checkpoint_ns` prefix | Primary artifact(s) | Typical next step |
+|-------|------------------------|---------------------|-------------------|
+| `extract` | `extract:` | `analysis/extracted` (+ per-file `extracted_*`) | `analyze` |
+| `analyze` | `analyze:` | `analysis/report` (or HITL-partial report) | orchestrator branch |
+| `draft_contract` | `draft_contract:` | `contracts/draft` | `validate_contract` |
+| `validate_contract` | `validate_contract:` | `contracts/review` | HITL / orchestrator |
+| `act` | `act:` | `drafts/reply` or `act/outcome` | `reflection` (optional) |
+| `reflection` | `reflection:` | (memory store episode) | end |
 
-Every stage follows the same pattern:
-- **LLM node** → binds stage-specific tools and prompt.
-- **Tool node** → `ToolNode(tool_list)`.
-- **Conditional edge** → `should_continue` routes to tools if the last message has `tool_calls`, otherwise to finalize.
-- **Finalize node** → `build_stage_result()` projects `messages` into a compact `StageResult`.
+**Extract** — LLM + tools (`fetch_email`, `run_attachment_extraction`, `analyze_image`, artifact writers). Finalize builds a rich `analysis/extracted` inventory (`provided_overview`, per-attachment previews, `thread_attachments` from sibling emails in the same provider thread).
+
+**Analyze** — Multi-node graph (not a single tool loop):
+
+```
+load_context → research ⟲ (tools + record_research) → decide → write_report
+              │                              │
+              └ prepare_hitl / unsupported   └ (structured AnalyzeDecision)
+```
+
+Research tools: `read_artifact`, `list_artifacts`, `search_related_docs` (knowledge graph). Report writing is deterministic from `user_input` + recorded research + structured decision.
+
+**Contract** — `draft_contract` fills templates from `analysis/report.action_payload`; `validate_contract` compares `contracts/draft` to examples and writes `contracts/review`.
+
+Most other stages follow the classic pattern: **LLM node** → **Tool node** → **conditional edge** → **finalize** (`build_stage_result()`).
 
 ### Shared State Schema
 
@@ -169,9 +201,9 @@ Every stage follows the same pattern:
 - `files` — dict merge
 - `artifact_index` — `artifact_index_reducer` (additive upsert by key)
 - `job_id`, `session_id`, `run_id`, `user_id`, `graph_thread_id`, `email_id`
-- `has_attachments` — pre-computed bool so stages branch without DB round-trips
+- `has_attachments`, `attachment_count` — pre-computed so extract branches without DB round-trips
+- `analyze_user_input`, `analyze_research`, `analyze_decision`, `analyze_needs_hitl` — analyze subgraph scratch (report persisted as artifact)
 - `stage_result` — compact handoff envelope
-- `extracted_info`, `analysis`, `action`, `draft`, `reflection` — business outputs
 
 ## Stage Output Contract
 
@@ -185,7 +217,7 @@ Each `finalize` node produces a deterministic `StageResult`:
     "primary_artifact_key": "analysis/report",
     "artifact_keys": ["analysis/extracted", "analysis/report"],
     "needs_human": False,
-    "next_stage": "act",            # null if awaiting_human or reflection
+    "next_stage": "act",            # orchestrator may route to contract stages instead
 }
 ```
 
@@ -201,14 +233,23 @@ All background work is Celery tasks triggered by redbeat or the API.
 |------|---------|-------------|
 | `poll_mailboxes` | redbeat (every `POLL_INTERVAL_SEC`) | Fan-out: enqueues `poll_mailbox` per active `Mailbox` |
 | `poll_mailbox` | `poll_mailboxes` | Fetch new messages, advance cursor, enqueue `ingest_message` per message |
-| `ingest_message` | `poll_mailbox` | Download attachments, map raw message, idempotent upsert into `IngestionItem` + `ProcessingJob` |
+| `ingest_message` | `poll_mailbox` | Download attachments, map raw message, idempotent upsert; enqueue `graph_index_item` when `KG_ENABLED` |
+
+### Graph Indexing (Knowledge Graph)
+
+| Task | Trigger | Description |
+|------|---------|-------------|
+| `graph_index_item` | `ingest_message` | Phase 1: project ingestion item + email body into `kg_entity` / `kg_mention` |
+| `graph_index_run` | `run_pipeline` completion | Phase 2: project session artifacts (`analysis/extracted`, `analysis/report`, `extracted_data/*`) into entities, edges, and document anchors |
+
+`KnowledgeGraphService.search_related` backs the analyze-stage `search_related_docs` tool (trgm/ilike entity search → provenance handles).
 
 ### Job Dispatch
 
 | Task | Trigger | Description |
 |------|---------|-------------|
 | `dispatch_ready_jobs` | redbeat (every `DISPATCH_INTERVAL_SEC`) | Claims `ready` jobs under `MAX_CONCURRENT_RUNS` budget via `ConcurrencyBudget` (Redis `SCARD`) |
-| `run_pipeline` | `dispatch_ready_jobs` | Transition `dispatched → processing`, create primary `Session` + `Run`, invoke agent |
+| `run_pipeline` | `dispatch_ready_jobs` | Transition `dispatched → processing`, create primary `Session` + `Run`, invoke agent with synthetic kickoff message (`task('extract', ...)`) |
 | `continue_session` | API or scheduler | Invoke agent for user follow-ups or scheduled wake-ups |
 | `resume_run` | API (interrupt resolution) | Resume interrupted graph with `Command(resume=...)` |
 
@@ -276,10 +317,14 @@ All routes are mounted under `/api` in `api/main.py`.
 
 ### `ArtifactService`
 - `write` — append-only new version; flips `is_latest`
-- `read` — resolves inline JSON or fetches from `BlobStore`
+- `read` — resolves inline JSON or fetches from `BlobStore` (strict session + key)
+- `read_resolved` — normalizes bare filenames (`executed_nda.docx` → `extracted_data/...`) and falls back to sibling **primary** sessions in the same email `provider_thread_id`
+- `session_ids_in_email_thread` — lists session IDs for thread-scoped artifact lookup
 - `update` — supports `merge='replace'`, `'json_merge_patch'` (RFC 7396), or `'json_patch'`
 - `list` — latest-only by default; `include_versions` for full history
 - `diff` — returns jsonpatch ops between two versions
+
+Tool and API reads use `read_resolved` so analyze can load attachments from parent messages in a thread without copying blobs into the child session.
 
 ### `SchedulingService`
 - `schedule_one_shot`, `schedule_recurring` (cron / interval)
@@ -295,6 +340,19 @@ Artifacts are session-scoped, versioned, and content-agnostic:
 - **Versioning** — Every write is a new row; `is_latest` is flipped. A partial unique index enforces one latest per `(session_id, key)`.
 - **Version cap** — `ARTIFACT_VERSION_CAP` (default 20) prevents unbounded growth.
 - **Handles** — `ArtifactRef` (Pydantic model) is the compact pointer carried in `AgentState.artifact_index`.
+
+### Common artifact keys
+
+| Key pattern | Producer | Role |
+|-------------|----------|------|
+| `analysis/extracted` | extract | Rich inventory: email summary, attachment rows, `thread_attachments` |
+| `extracted_data/*`, `extracted_text/*`, `image_analysis/*` | extract | Per-attachment payloads |
+| `analysis/report` | analyze | Structured decision: `action`, `action_payload`, `research`, `missing_information` |
+| `contracts/draft`, `contracts/review` | contract stages | Drafted agreement + validation observations |
+| `drafts/reply` | act | Reply draft (DB `draft` row; send via `send_draft`) |
+| `act/outcome` | analyze or act | Unsupported or terminal act result |
+
+Large tool/API payloads are truncated via `read_policy.maybe_summarize_artifact_content` (`READ_ARTIFACT_SUMMARY_MAX_BYTES`).
 
 ## Interrupts & Human-in-the-Loop
 
@@ -343,10 +401,20 @@ Replaying a stage supersedes earlier artifact versions by creating new versions 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AGENT_MODEL` | `anthropic:claude-sonnet-4-5` | Main LLM |
+| `AGENT_MODEL` | `anthropic:claude-sonnet-4-5` | Orchestrator LLM |
+| `EXTRACT_MODEL` | `anthropic:claude-haiku-4-5` | Extract stage |
+| `ANALYZE_MODEL` | `anthropic:claude-haiku-4-5` | Analyze stage default |
+| `ANALYZE_RESEARCH_MODEL` | (optional) | Analyze research loop |
+| `ANALYZE_DECIDE_MODEL` | (optional) | Analyze structured decision |
+| `ANALYZE_MAX_RESEARCH_STEPS` | `12` | Cap analyze tool research iterations |
+| `ACT_MODEL` / `CONTRACT_MODEL` / `CONTRACT_VALIDATION_MODEL` | per-stage | Act and contract subgraphs |
 | `SUMMARIZATION_MODEL` | `anthropic:claude-haiku-4-5` | Summarization middleware |
 | `VISION_MODEL` | `anthropic:claude-opus-4-6` | Image analysis |
 | `EMBED_MODEL` / `EMBED_DIMS` | `openai:text-embedding-3-small` / `1536` | Memory store embedding |
+| `READ_ARTIFACT_SUMMARY_MAX_BYTES` | `4096` | Truncate artifact content returned to models |
+| `STAGE_RECURSION_LIMIT_*` | varies | Per-stage LangGraph recursion caps |
+| `KG_ENABLED` | `true` | Ingest + run knowledge-graph projection |
+| `KG_SEARCH_TOP_K` | `8` | `search_related_docs` result limit |
 | `MAX_CONCURRENT_RUNS` | `10` | Pipeline concurrency ceiling |
 | `DISPATCH_INTERVAL_SEC` | `10` | How often to poll for ready jobs |
 | `DISPATCH_LEASE_SEC` | `120` | Max time a job may sit in `dispatched` |
@@ -355,3 +423,5 @@ Replaying a stage supersedes earlier artifact versions by creating new versions 
 | `ARTIFACT_INLINE_MAX_BYTES` | `32768` | Inline JSON threshold |
 | `ARTIFACT_VERSION_CAP` | `20` | Max versions per `(session, key)` |
 | `BIGTOOL_ENABLED` | `False` | Progressive tool-disclosure middleware |
+| `REFLECTION_ENABLED` | `true` | Register reflection subagent |
+| `LANGCHAIN_TRACING_V2` / `LANGSMITH_*` | optional | LangSmith traces (worker must reload env) |
